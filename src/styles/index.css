@@ -1,0 +1,302 @@
+@import 'tailwindcss';
+
+/*
+ * Self-hosted so the Content-Security-Policy can stay `font-src 'self'`.
+ * Google's CDN would need both fonts.googleapis.com in style-src and
+ * fonts.gstatic.com in font-src — see section 34 and the CSP notes in
+ * netlify.toml.
+ */
+@import '@fontsource/inter/400.css';
+@import '@fontsource/inter/500.css';
+@import '@fontsource/inter/600.css';
+@import '@fontsource/inter/700.css';
+@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/jetbrains-mono/500.css';
+@import '@fontsource/jetbrains-mono/600.css';
+
+/*
+ * Design tokens — specification section 35, styled to match the Zoho-style
+ * inventory palette: a cool light canvas, white cards, a single blue accent
+ * and four status tones. Status is never carried by colour alone; every tone
+ * is paired with a text label and a glyph in the components.
+ *
+ * The palette is deliberately light-only. The reference UI has no dark mode,
+ * and a half-supported dark theme reads worse than none — `color-scheme` in
+ * index.html is pinned to `light` to stop the browser applying its own dark
+ * form controls over the top.
+ */
+@theme {
+  --color-canvas: #eef2f8;
+  --color-surface: #ffffff;
+  --color-surface-raised: #fafbfd;
+  --color-surface-sunken: #eef2f8;
+  --color-row-hover: #f6f8fc;
+
+  --color-border: #e6eaf1;
+  --color-border-strong: #d5dbe5;
+
+  --color-ink: #1e2a3d;
+  --color-ink-muted: #697a92;
+  --color-ink-subtle: #9aa6b8;
+
+  --color-brand: #2563eb;
+  --color-brand-hover: #1d4fd7;
+  --color-brand-subtle: #eaf1fe;
+
+  /* Status tones. Each is paired with an icon and text label in the UI. */
+  --color-neutral: #697a92;
+  --color-neutral-bg: #edf1f4;
+  --color-info: #2563eb;
+  --color-info-bg: #eaf1fe;
+  --color-success: #16a34a;
+  --color-success-bg: #e7f6ee;
+  --color-warning: #d97706;
+  --color-warning-bg: #fcf1df;
+  --color-danger: #dc2626;
+  --color-danger-bg: #fcebeb;
+
+  --radius-card: 0.75rem;
+
+  --font-sans:
+    'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, monospace;
+
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.05), 0 1px 3px rgba(16, 24, 40, 0.05);
+  --shadow-raised: 0 4px 14px rgba(16, 24, 40, 0.08);
+  --shadow-overlay: 0 24px 60px rgba(16, 24, 40, 0.22);
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Section 36: focus must always be visible, but soft rather than harsh. */
+  :focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.22);
+    border-radius: 4px;
+  }
+
+  button,
+  input,
+  textarea,
+  select {
+    transition:
+      background-color 0.15s ease,
+      border-color 0.15s ease,
+      color 0.15s ease,
+      box-shadow 0.15s ease,
+      transform 0.08s ease;
+  }
+
+  /*
+   * Browsers give <button> `cursor: default`, and Tailwind's preflight does not
+   * override it — so every button in the app showed an arrow rather than a
+   * hand. Combined with a low-contrast label that made enabled controls read as
+   * disabled. Set here rather than per-component so raw <button> elements (the
+   * filter chips, the row checkboxes, the adjust controls) get it too.
+   */
+  button:not(:disabled),
+  [role='button']:not([aria-disabled='true']) {
+    cursor: pointer;
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+  }
+
+  button:not(:disabled):active {
+    transform: translateY(0.5px);
+  }
+
+  /* A cleaner count field — the native spinners are too small to hit safely. */
+  input[type='number']::-webkit-outer-spin-button,
+  input[type='number']::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type='number'] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+
+  ::placeholder {
+    color: var(--color-ink-subtle);
+    opacity: 1;
+  }
+
+  /* Slim, unobtrusive scrollbars. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #cbd3df transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: #cbd3df;
+    border-radius: 999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background: #aeb9c9;
+    background-clip: content-box;
+  }
+
+  /* Section 35: minimal unnecessary animation. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    color: var(--color-ink);
+    font-weight: 600;
+    line-height: 1.25;
+    letter-spacing: -0.2px;
+  }
+}
+
+@layer components {
+  /* Screen-reader-only helper (section 36). */
+  .sr-only-focusable:not(:focus):not(:focus-within) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border-width: 0;
+  }
+
+  /* The single blue accent, used for primary actions and the brand mark. */
+  .brand-gradient {
+    background: linear-gradient(180deg, #2d74f0 0%, #2563eb 100%);
+  }
+  .brand-gradient:hover:not(:disabled) {
+    background: linear-gradient(180deg, #2566e6 0%, #1d4fd7 100%);
+  }
+
+  /* Section 35: brief, non-blocking scanner feedback. */
+  @keyframes scan-flash-success {
+    0% {
+      background-color: var(--color-success-bg);
+    }
+    100% {
+      background-color: transparent;
+    }
+  }
+
+  @keyframes scan-shake {
+    0%,
+    100% {
+      transform: translateX(0);
+    }
+    25% {
+      transform: translateX(-4px);
+    }
+    75% {
+      transform: translateX(4px);
+    }
+  }
+
+  .scan-flash-success {
+    animation: scan-flash-success 380ms ease-out;
+  }
+
+  .scan-flash-error {
+    animation: scan-shake 180ms ease-in-out;
+  }
+
+  /* Shared motion primitives. */
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @keyframes rowIn {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  @keyframes popIn {
+    from {
+      opacity: 0;
+      transform: scale(0.96) translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1) translateY(0);
+    }
+  }
+  @keyframes slideInRight {
+    from {
+      opacity: 0;
+      transform: translateX(24px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+
+  .animate-row-in {
+    animation: rowIn 0.22s ease;
+  }
+  .animate-fade-in {
+    animation: fadeIn 0.18s ease;
+  }
+  .animate-pop-in {
+    animation: popIn 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .animate-slide-in-right {
+    animation: slideInRight 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  /* Tabular figures keep the large count display from jittering as it grows. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}

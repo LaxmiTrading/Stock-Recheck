@@ -1,0 +1,403 @@
+/**
+ * Zoho Books read operations — specification sections 16 and 32.
+ *
+ * Everything here is GET-only; the transport itself refuses any other method.
+ * Field access is defensive: Zoho's payload differs between accounts that use
+ * locations or custom fields, so we probe several plausible field names and
+ * fall back to the documented "not available" strings rather than failing a
+ * row (section 16).
+ *
+ * ------------------------------------------------------------------------
+ * WHY BOOKS AND NOT INVENTORY
+ * The Zoho API console issues a refresh token against ONE product family. A
+ * `ZohoBooks.*` token is rejected by every `/inventory/v1/*` endpoint with
+ * HTTP 401 code 57 ("You are not authorized to perform this operation"), and
+ * the reverse is equally true — the failure is an authorization error, not a
+ * missing-feature error, so it is easy to misread as a bad token.
+ *
+ * Books has no item groups and no warehouses; both are Inventory-only
+ * concepts. Stock lives on the item itself and on locations.
+ * ------------------------------------------------------------------------
+ */
+
+import { toNormalizedSku } from '../../../src/domain/sku';
+import { resolveStockQuantity, type StockBasis } from '../../../src/domain/stockBasis';
+import { ZohoAuthenticationError, ZohoUnexpectedResponseError } from '../errors';
+import { mapWithConcurrency, zohoGet } from './client';
+import { getAccessToken, invalidateAccessToken, requireResolvedCredentials } from './tokens';
+import type {
+  ZohoItemDetail,
+  ZohoItemResponse,
+  ZohoItemsListResponse,
+  ZohoItemSummary,
+  ZohoLocationRecord,
+  ZohoLocationsResponse,
+  ZohoOrganization,
+  ZohoOrganizationsResponse,
+  ZohoWarehouseRecord,
+} from './types';
+
+/** Section 32: bounded concurrency against Zoho. */
+export const ZOHO_CONCURRENCY = 4;
+
+/* ---------------------------------------------------------- field helpers */
+
+function firstNonEmptyString(...candidates: unknown[]): string | null {
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim() !== '') return candidate.trim();
+  }
+  return null;
+}
+
+function toNumberOrNull(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+/** Case/space-insensitive custom-field lookup, e.g. "Brand" or "cf_brand". */
+function customFieldValue(
+  item: { custom_fields?: { label?: string; api_name?: string; value?: unknown }[] } | undefined,
+  wanted: string,
+): string | null {
+  const normalize = (value: string): string => value.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const target = normalize(wanted);
+
+  for (const field of item?.custom_fields ?? []) {
+    const label = normalize(field.label ?? '');
+    const apiName = normalize(field.api_name ?? '').replace(/^cf/, '');
+    if (label === target || apiName === target) {
+      const value = field.value;
+      if (typeof value === 'string' && value.trim() !== '') return value.trim();
+      if (typeof value === 'number') return String(value);
+    }
+  }
+  return null;
+}
+
+/** Section 16 — item is active. */
+export function isItemActive(item: ZohoItemSummary): boolean {
+  const status = (item.status ?? '').toLowerCase();
+  // Absent status is treated as active: some list responses omit it.
+  return status === '' || status === 'active';
+}
+
+/**
+ * Section 16 — item is a stock-tracked inventory item.
+ * Zoho signals this through `product_type: 'goods'` combined with either
+ * `item_type: 'inventory'` or `track_inventory: true`, depending on API version.
+ */
+export function isInventoryTracked(item: ZohoItemSummary): boolean {
+  const productType = (item.product_type ?? '').toLowerCase();
+  if (productType === 'service' || productType === 'digital_service') return false;
+
+  const itemType = (item.item_type ?? '').toLowerCase();
+  if (itemType === 'inventory') return true;
+  if (item.track_inventory === true) return true;
+
+  // When neither signal is present, fall back to "has a stock figure".
+  if (itemType === '' && item.track_inventory === undefined) {
+    return toNumberOrNull(item.stock_on_hand) !== null;
+  }
+  return false;
+}
+
+/* ------------------------------------------------------------- reader API */
+
+export interface ResolvedZohoItem {
+  zohoItemId: string;
+  itemName: string;
+  sku: string;
+  normalizedSku: string;
+  stockInHand: number;
+  vendorName: string | null;
+  brandName: string | null;
+  manufacturerName: string | null;
+  unit: string | null;
+}
+
+export type SkuLookupOutcome =
+  | { kind: 'found'; item: ZohoItemDetail }
+  | { kind: 'not_found' }
+  | { kind: 'ambiguous'; matchCount: number };
+
+/**
+ * The read surface the validator depends on. Both the live client and the mock
+ * implement it, so mock mode exercises the same code path.
+ */
+export interface BooksReader {
+  lookupBySku(sku: string, correlationId: string): Promise<SkuLookupOutcome>;
+  listOrganizations(correlationId: string): Promise<ZohoOrganization[]>;
+  listLocations(
+    correlationId: string,
+  ): Promise<{ locations: ZohoLocationRecord[]; warehouses: ZohoWarehouseRecord[] }>;
+  testConnection(correlationId: string): Promise<{ organizationName: string | null; responseMs: number }>;
+  readonly isMock: boolean;
+}
+
+/* --------------------------------------------------------- live implementation */
+
+async function getWithAuthRetry<Body>(params: {
+  path: string;
+  searchParams?: Record<string, string | number | undefined>;
+  correlationId: string;
+}): Promise<Body> {
+  const credentials = await requireResolvedCredentials();
+
+  const run = async (forceRefresh: boolean): Promise<Body> => {
+    const { accessToken, apiDomain } = await getAccessToken(params.correlationId, { forceRefresh });
+    const response = await zohoGet<Body>({
+      path: params.path,
+      searchParams: params.searchParams,
+      accessToken,
+      apiDomain,
+      organizationId: credentials.organizationId,
+      correlationId: params.correlationId,
+    });
+    return response.body;
+  };
+
+  try {
+    return await run(false);
+  } catch (error) {
+    // Section 32: on a 401, refresh ONCE and retry ONCE. A second failure
+    // propagates so the caller can mark the connection unhealthy.
+    if (error instanceof ZohoAuthenticationError) {
+      invalidateAccessToken();
+      return run(true);
+    }
+    throw error;
+  }
+}
+
+class LiveBooksReader implements BooksReader {
+  readonly isMock = false;
+
+  /**
+   * Exact-SKU search — section 16 step 4.
+   *
+   * Zoho's `sku` filter is an exact match server-side, but we re-verify every
+   * returned row against the normalized SKU because some Zoho versions treat
+   * the parameter as a prefix search. Anything that survives that check and
+   * leaves more than one item is genuinely ambiguous.
+   */
+  async lookupBySku(sku: string, correlationId: string): Promise<SkuLookupOutcome> {
+    const normalized = toNormalizedSku(sku);
+
+    const listResponse = await getWithAuthRetry<ZohoItemsListResponse>({
+      path: '/books/v3/items',
+      searchParams: { sku, per_page: 50 },
+      correlationId,
+    });
+
+    const candidates = (listResponse.items ?? []).filter(
+      (item) => toNormalizedSku(item.sku ?? '') === normalized,
+    );
+
+    if (candidates.length === 0) return { kind: 'not_found' };
+    if (candidates.length > 1) return { kind: 'ambiguous', matchCount: candidates.length };
+
+    const summary = candidates[0] as ZohoItemSummary;
+    const itemId = summary.item_id;
+    if (typeof itemId !== 'string' || itemId === '') {
+      throw new ZohoUnexpectedResponseError('Zoho returned an item without an identifier.');
+    }
+
+    // Step 9: fetch full detail for stock breakdown, vendor and attributes.
+    const detailResponse = await getWithAuthRetry<ZohoItemResponse>({
+      path: `/books/v3/items/${encodeURIComponent(itemId)}`,
+      correlationId,
+    });
+
+    const detail = detailResponse.item;
+    if (detail === undefined) {
+      throw new ZohoUnexpectedResponseError('Zoho returned an empty item detail response.');
+    }
+
+    return { kind: 'found', item: { ...summary, ...detail } };
+  }
+
+  async listOrganizations(correlationId: string): Promise<ZohoOrganization[]> {
+    const response = await getWithAuthRetry<ZohoOrganizationsResponse>({
+      path: '/books/v3/organizations',
+      correlationId,
+    });
+    return response.organizations ?? [];
+  }
+
+  async listLocations(
+    correlationId: string,
+  ): Promise<{ locations: ZohoLocationRecord[]; warehouses: ZohoWarehouseRecord[] }> {
+    /*
+     * Books models multi-location stock as LOCATIONS only. Warehouses are an
+     * Inventory-only concept with no Books equivalent, so the list is always
+     * empty here rather than probing an endpoint that cannot exist. The shape
+     * is kept so the stock-basis code and its tests stay unchanged.
+     */
+    const locations = await getWithAuthRetry<ZohoLocationsResponse>({
+      path: '/books/v3/locations',
+      correlationId,
+    }).catch(() => ({ locations: [] }) as ZohoLocationsResponse);
+
+    return { locations: locations.locations ?? [], warehouses: [] };
+  }
+
+  async testConnection(
+    correlationId: string,
+  ): Promise<{ organizationName: string | null; responseMs: number }> {
+    const startedAt = Date.now();
+    const organizations = await this.listOrganizations(correlationId);
+    const credentials = await requireResolvedCredentials();
+    const match = organizations.find(
+      (organization) => organization.organization_id === credentials.organizationId,
+    );
+    return {
+      organizationName: match?.name ?? organizations[0]?.name ?? null,
+      responseMs: Date.now() - startedAt,
+    };
+  }
+}
+
+/* ------------------------------------------------------------- resolution */
+
+export type ResolutionFailure =
+  | 'INACTIVE_ITEM'
+  | 'NOT_INVENTORY_TRACKED'
+  | 'STOCK_BASIS_NOT_FOUND'
+  | 'STOCK_QUANTITY_UNAVAILABLE'
+  | 'UNEXPECTED_ZOHO_RESPONSE';
+
+export type ResolutionResult =
+  | { ok: true; item: ResolvedZohoItem }
+  | { ok: false; failure: ResolutionFailure };
+
+/** Extracts the preferred vendor name — section 16. */
+export function resolveVendorName(item: ZohoItemDetail): string | null {
+  const primary = item.preferred_vendors?.find((vendor) => vendor.is_primary === true);
+  return firstNonEmptyString(
+    primary?.vendor_name,
+    item.preferred_vendors?.[0]?.vendor_name,
+    item.vendor_name,
+  );
+}
+
+/**
+ * Brand / manufacturer resolution priority — section 16:
+ *   1. direct item-level value
+ *   2. recognized custom field
+ *   3. null (rendered as "Not available in Zoho" by the display helpers)
+ *
+ * The item-group tier the specification lists between these two is gone: Books
+ * has no item groups, so there is no second record to fall back to.
+ */
+export function resolveAttribute(
+  attribute: 'brand' | 'manufacturer',
+  item: ZohoItemDetail,
+): string | null {
+  return firstNonEmptyString(item[attribute], customFieldValue(item, attribute));
+}
+
+/**
+ * Turns a Zoho item into the immutable snapshot stored on the import row.
+ * Returns a typed failure instead of throwing so one bad row never fails the
+ * whole import (section 15).
+ */
+export function resolveItemSnapshot(params: {
+  item: ZohoItemDetail;
+  stockBasis: StockBasis;
+  caseSensitive: boolean;
+}): ResolutionResult {
+  const { item, stockBasis } = params;
+
+  if (!isItemActive(item)) return { ok: false, failure: 'INACTIVE_ITEM' };
+  if (!isInventoryTracked(item)) return { ok: false, failure: 'NOT_INVENTORY_TRACKED' };
+
+  const itemId = item.item_id;
+  const itemName = item.name;
+  const sku = item.sku;
+  if (
+    typeof itemId !== 'string' ||
+    typeof itemName !== 'string' ||
+    typeof sku !== 'string' ||
+    sku.trim() === ''
+  ) {
+    return { ok: false, failure: 'UNEXPECTED_ZOHO_RESPONSE' };
+  }
+
+  const stock = resolveStockQuantity(
+    {
+      stockOnHand: toNumberOrNull(item.stock_on_hand),
+      locations: (item.locations ?? []).map((entry) => ({
+        locationId: entry.location_id ?? null,
+        locationName: entry.location_name ?? null,
+        locationStockOnHand: toNumberOrNull(entry.location_stock_on_hand),
+      })),
+      // Always empty for Books; retained so the stock-basis contract is one
+      // shape across both the live reader and the mock.
+      warehouses: (item.warehouses ?? []).map((entry) => ({
+        warehouseId: entry.warehouse_id ?? null,
+        warehouseName: entry.warehouse_name ?? null,
+        warehouseStockOnHand: toNumberOrNull(entry.warehouse_stock_on_hand),
+      })),
+    },
+    stockBasis,
+  );
+
+  if (!stock.ok) return { ok: false, failure: stock.failure };
+
+  return {
+    ok: true,
+    item: {
+      zohoItemId: itemId,
+      // Section 16: the Zoho name and SKU are authoritative after a match.
+      itemName,
+      sku,
+      normalizedSku: toNormalizedSku(sku, { caseSensitive: params.caseSensitive }),
+      stockInHand: stock.quantity,
+      vendorName: resolveVendorName(item),
+      brandName: resolveAttribute('brand', item),
+      manufacturerName: resolveAttribute('manufacturer', item),
+      unit: firstNonEmptyString(item.unit),
+    },
+  };
+}
+
+/* ------------------------------------------------------------- factory -- */
+
+let mockReaderFactory: (() => BooksReader) | null = null;
+
+/** Registered by the mock module so this file has no import-time dependency on it. */
+export function registerMockReaderFactory(factory: () => BooksReader): void {
+  mockReaderFactory = factory;
+}
+
+export function isMockModeEnabled(): boolean {
+  return process.env.ZOHO_MOCK_MODE === 'true';
+}
+
+/**
+ * Returns the reader for the current environment.
+ * Mock mode must be enabled explicitly and is refused in production unless the
+ * operator has also set ALLOW_MOCK_IN_PRODUCTION (section 42).
+ */
+export async function createBooksReader(): Promise<BooksReader> {
+  if (isMockModeEnabled()) {
+    const isProduction = process.env.NODE_ENV === 'production' || process.env.CONTEXT === 'production';
+    if (isProduction && process.env.ALLOW_MOCK_IN_PRODUCTION !== 'true') {
+      throw new Error(
+        'ZOHO_MOCK_MODE is enabled in a production context. Refusing to serve mock inventory data.',
+      );
+    }
+    if (mockReaderFactory === null) {
+      const module = await import('./mock');
+      registerMockReaderFactory(module.createMockBooksReader);
+    }
+    return (mockReaderFactory as () => BooksReader)();
+  }
+  return new LiveBooksReader();
+}
+
+export { mapWithConcurrency };

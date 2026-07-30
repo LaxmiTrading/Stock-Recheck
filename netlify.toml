@@ -1,0 +1,93 @@
+#-----------------------------------------------------------------------------
+# Netlify build + runtime configuration
+# Section 4.2 of the specification.
+#-----------------------------------------------------------------------------
+
+[build]
+  command = "npm run build"
+  publish = "dist"
+  functions = "netlify/functions"
+
+[build.environment]
+  NODE_VERSION = "20"
+  NPM_FLAGS = "--legacy-peer-deps=false"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+  # pg ships an optional native binding and exceljs ships a large browser bundle.
+  # Shipping them unbundled is more reliable than letting esbuild inline them.
+  external_node_modules = ["pg", "pg-native", "exceljs"]
+
+# NOTE: function timeout is not configurable from netlify.toml. Import
+# validation against Zoho can be slow for large sheets; if it approaches the
+# platform limit, raise it under Site configuration → Functions, or split the
+# validation into batched requests.
+
+[dev]
+  # `command` + `targetPort` tells netlify dev to start Vite and PROXY to it.
+  # `publish` must NOT be set here as well: that would ask netlify dev to serve
+  # static files from a build directory at the same time, which conflicts with
+  # proxying and leaves /api unrouted.
+  command = "npm run dev:vite"
+  targetPort = 5173
+  port = 8888
+  autoLaunch = false
+
+#-----------------------------------------------------------------------------
+# SPA redirect.
+#
+# Function routes (declared via each function's `config.path`) are matched
+# BEFORE redirects, so a real /api/* endpoint never reaches this rule.
+#
+# Do NOT add a `from = "/api/*"` rule here. A redirect rule is applied to the
+# function's response as well, which rewrites every legitimate 4xx from the API
+# (403 FORBIDDEN, 409 conflicts) into whatever the rule specifies — masking the
+# real error from the client.
+#-----------------------------------------------------------------------------
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+#-----------------------------------------------------------------------------
+# Security headers — section 34.
+#-----------------------------------------------------------------------------
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=(), interest-cohort=()"
+    Strict-Transport-Security = "max-age=31536000; includeSubDomains"
+    Cross-Origin-Opener-Policy = "same-origin"
+    Content-Security-Policy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://*.zoho.in https://*.zoho.com; font-src 'self' data:; connect-src 'self'; media-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+#-----------------------------------------------------------------------------
+# Local-development CSP override — the `dev` context ONLY.
+#
+# `netlify dev` runs in the `dev` context, so these rules are merged on top of
+# the ones above when developing and are ignored by every deployed context
+# (production, deploy-preview, branch-deploy). netlify dev collapses all
+# matching rules with `Object.assign`, so for a repeated header name the LAST
+# matching rule wins — this replaces the CSP locally and changes nothing that
+# ships.
+#
+# Why it is needed: Vite's dev server injects an inline <script> preamble for
+# React Fast Refresh. Under `script-src 'self'` the browser blocks it,
+# @vitejs/plugin-react then throws "can't detect preamble", module evaluation
+# stops and the SPA never mounts — the page renders blank. The PRODUCTION
+# bundle contains no inline script, so the strict policy above stays correct
+# for everything that is actually deployed; do not copy these relaxations up
+# into the `[[headers]]` block.
+#-----------------------------------------------------------------------------
+[[context.dev.headers]]
+  for = "/*"
+  [context.dev.headers.values]
+    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws://localhost:* http://localhost:*; media-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
