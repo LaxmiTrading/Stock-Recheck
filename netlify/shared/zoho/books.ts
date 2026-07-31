@@ -22,7 +22,11 @@
 
 import { toNormalizedSku } from '../../../src/domain/sku';
 import { resolveStockQuantity, type StockBasis } from '../../../src/domain/stockBasis';
-import { ZohoAuthenticationError, ZohoUnexpectedResponseError } from '../errors';
+import {
+  ZohoAuthenticationError,
+  ZohoRateLimitedError,
+  ZohoUnexpectedResponseError,
+} from '../errors';
 import { mapWithConcurrency, zohoGet } from './client';
 import { getAccessToken, invalidateAccessToken, requireResolvedCredentials } from './tokens';
 import type {
@@ -66,10 +70,42 @@ const BULK_LOOKUP_THRESHOLD = 25;
 /** Refuses to page forever if `has_more_page` never goes false. */
 const MAX_CATALOGUE_PAGES = 500;
 
-/** Breather between pages, so a long sweep does not trip Zoho's rate limiter. */
-const CATALOGUE_PAGE_DELAY_MS = 120;
+/**
+ * Pages fetched in parallel.
+ *
+ * A real catalogue here is ~10,000 items — 51 pages at roughly 600 ms each,
+ * which is ~36 s sequentially and therefore still over the platform ceiling
+ * even after the request count collapsed. The pages are independent, so
+ * fetching them in waves brings that back under ten seconds.
+ *
+ * Kept modest because the point is to fit the budget, not to hammer Zoho: 51
+ * requests spread over a few seconds sits far inside a per-minute quota, and
+ * `withRateLimitRetry` absorbs a burst if one is hit anyway.
+ */
+const CATALOGUE_PAGE_CONCURRENCY = 6;
+
+/** Attempts per page when Zoho answers 429. */
+const RATE_LIMIT_RETRIES = 3;
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Retries a rate-limited call with linear backoff.
+ *
+ * Only 429 is retried. Anything else — including an auth failure — propagates
+ * immediately, because repeating it would waste the request budget the sweep is
+ * trying to conserve.
+ */
+async function withRateLimitRetry<T>(run: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await run();
+    } catch (error) {
+      if (!(error instanceof ZohoRateLimitedError) || attempt >= RATE_LIMIT_RETRIES) throw error;
+      await delay(attempt * 1000);
+    }
+  }
+}
 
 /* ---------------------------------------------------------- field helpers */
 
@@ -297,15 +333,16 @@ class LiveBooksReader implements BooksReader {
 
     const bySku = new Map<string, ZohoItemSummary[]>();
 
-    for (let page = 1; page <= MAX_CATALOGUE_PAGES; page += 1) {
-      if (options.signal?.aborted === true) break;
+    const fetchPage = async (page: number): Promise<ZohoItemsListResponse> =>
+      withRateLimitRetry(() =>
+        getWithAuthRetry<ZohoItemsListResponse>({
+          path: '/books/v3/items',
+          searchParams: { page, per_page: CATALOGUE_PAGE_SIZE },
+          correlationId,
+        }),
+      );
 
-      const response = await getWithAuthRetry<ZohoItemsListResponse>({
-        path: '/books/v3/items',
-        searchParams: { page, per_page: CATALOGUE_PAGE_SIZE },
-        correlationId,
-      });
-
+    const absorb = (response: ZohoItemsListResponse): void => {
       for (const item of response.items ?? []) {
         // Normalized the same way as the per-SKU path, so both agree on what
         // counts as a match.
@@ -315,17 +352,39 @@ class LiveBooksReader implements BooksReader {
         if (existing === undefined) bySku.set(normalized, [item]);
         else existing.push(item);
       }
+    };
 
-      if (response.page_context?.has_more_page !== true) break;
+    /*
+     * Fetched in waves rather than one page after another.
+     *
+     * Zoho reports only `has_more_page`, never a total, so the page count is
+     * unknown up front and cannot simply be fanned out. Requesting a fixed
+     * window concurrently and stopping at the first page that reports no more
+     * gets the parallelism anyway. Overshooting within a wave is harmless: the
+     * pages past the end come back empty.
+     */
+    let reachedEnd = false;
 
-      if (page === MAX_CATALOGUE_PAGES) {
+    for (let first = 1; !reachedEnd && first <= MAX_CATALOGUE_PAGES; first += CATALOGUE_PAGE_CONCURRENCY) {
+      if (options.signal?.aborted === true) break;
+
+      const wave = Array.from({ length: CATALOGUE_PAGE_CONCURRENCY }, (_, offset) => first + offset);
+      const responses = await Promise.all(wave.map(fetchPage));
+
+      for (const response of responses) {
+        absorb(response);
+        if (response.page_context?.has_more_page !== true) {
+          reachedEnd = true;
+          break;
+        }
+      }
+
+      if (!reachedEnd && first + CATALOGUE_PAGE_CONCURRENCY > MAX_CATALOGUE_PAGES) {
         throw new ZohoUnexpectedResponseError(
           `The Zoho catalogue exceeds ${MAX_CATALOGUE_PAGES * CATALOGUE_PAGE_SIZE} items; ` +
             'import validation cannot page it in one request.',
         );
       }
-
-      await delay(CATALOGUE_PAGE_DELAY_MS);
     }
 
     for (const sku of unique) {
