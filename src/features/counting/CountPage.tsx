@@ -57,8 +57,6 @@ interface ItemDetail {
   normalizedSku: string;
   zohoStock: number | null;
   vendor: string | null;
-  brand: string | null;
-  manufacturer: string | null;
   unit: string | null;
   workflowStatus: 'available' | 'counting_in_progress' | 'submitted';
   resultStatus: 'pending' | 'matched' | 'mismatched';
@@ -487,14 +485,6 @@ export default function CountPage(): React.JSX.Element {
           <div>
             <dt className="text-xs text-[var(--color-ink-subtle)]">Vendor</dt>
             <dd>{item.vendor ?? 'Not available in Zoho'}</dd>
-          </div>
-          <div>
-            <dt className="text-xs text-[var(--color-ink-subtle)]">Brand</dt>
-            <dd>{item.brand ?? 'Not available in Zoho'}</dd>
-          </div>
-          <div>
-            <dt className="text-xs text-[var(--color-ink-subtle)]">Manufacturer</dt>
-            <dd>{item.manufacturer ?? 'Not available in Zoho'}</dd>
           </div>
           <div>
             <dt className="text-xs text-[var(--color-ink-subtle)]">Unit</dt>

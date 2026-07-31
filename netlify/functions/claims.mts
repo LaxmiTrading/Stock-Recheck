@@ -85,8 +85,6 @@ function serializeItem(item: Awaited<ReturnType<typeof findItemById>>, actor: Ac
     normalizedSku: item.normalized_sku,
     zohoStock: item.zoho_stock_quantity,
     vendor: item.vendor_name,
-    brand: item.brand_name,
-    manufacturer: item.manufacturer_name,
     unit: item.unit,
     workflowStatus: item.workflow_status,
     resultStatus: item.result_status,

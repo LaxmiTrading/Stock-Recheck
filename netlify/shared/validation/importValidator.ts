@@ -4,7 +4,7 @@
  * Executes the documented algorithm for every unique SKU:
  *   normalize → blank check → duplicate check → exact Zoho search →
  *   active check → inventory-tracked check → detail fetch →
- *   stock resolution → vendor / unit / brand / manufacturer → snapshot.
+ *   stock resolution → vendor / unit → snapshot.
  *
  * Design rules honoured here:
  *   - One Zoho lookup per UNIQUE SKU, never per row (section 15).
@@ -26,10 +26,9 @@ import {
 } from '../errors';
 import { logInfo } from '../http';
 import {
-  mapWithConcurrency,
   resolveItemSnapshot,
-  ZOHO_CONCURRENCY,
   type BooksReader,
+  type SkuLookupOutcome,
 } from '../zoho/books';
 import type { ResolvedSnapshot } from '../repositories/imports';
 
@@ -150,71 +149,91 @@ export async function validateImportRows(
 
   let abortedReason: ValidationSummary['abortedReason'] = null;
 
-  const outcomes = await mapWithConcurrency<string, [string, SkuOutcome]>(
-    uniqueSkus,
-    ZOHO_CONCURRENCY,
-    async (normalizedSku) => {
-      // Cooperative cancellation and hard stop on broken authentication.
-      if (context.signal?.aborted === true) {
-        abortedReason = 'cancelled';
-        return [normalizedSku, { kind: 'failed', code: 'ZOHO_TEMPORARILY_UNAVAILABLE' }];
-      }
-      if (abortedReason === 'zoho_authentication') {
-        return [normalizedSku, { kind: 'failed', code: 'ZOHO_AUTHENTICATION_FAILED' }];
-      }
+  /*
+   * ONE bulk resolution rather than a lookup per SKU.
+   *
+   * The per-SKU path costs two Zoho round trips each (a search, then a detail
+   * fetch), so a 1200-SKU import needed ~2500 requests and was killed by the
+   * platform mid-flight — the browser received a non-JSON error page rather
+   * than any result. `lookupManyBySku` pages the catalogue once instead, so the
+   * request count no longer scales with the import.
+   *
+   * A failure here is not per-row: nothing was resolved, so every SKU carries
+   * the same code rather than one row's error being attributed to it.
+   */
+  let lookups = new Map<string, SkuLookupOutcome>();
+  let bulkFailureCode: ReturnType<typeof zohoErrorToFailureCode> | null = null;
 
-      try {
-        const lookup = await context.reader.lookupBySku(normalizedSku, context.correlationId);
+  try {
+    lookups = await context.reader.lookupManyBySku(uniqueSkus, context.correlationId, {
+      signal: context.signal,
+      // Only the detail payload carries the per-location stock breakdown, so a
+      // location or warehouse basis cannot be served from the list alone.
+      requireDetail: context.stockBasis.type !== 'organization',
+    });
+  } catch (error) {
+    bulkFailureCode = zohoErrorToFailureCode(error);
 
-        if (lookup.kind === 'not_found') {
-          return [normalizedSku, { kind: 'failed', code: 'SKU_NOT_FOUND' }];
-        }
-        if (lookup.kind === 'ambiguous') {
-          return [normalizedSku, { kind: 'failed', code: 'AMBIGUOUS_SKU' }];
-        }
+    // Section 32: broken authentication stops validation rather than burning
+    // every remaining row against a dead connection.
+    if (bulkFailureCode === 'ZOHO_AUTHENTICATION_FAILED') {
+      abortedReason = 'zoho_authentication';
+      logInfo('import.validation_aborted', {
+        correlationId: context.correlationId,
+        reason: 'zoho_authentication',
+      });
+    }
+  }
 
-        const resolution = resolveItemSnapshot({
-          item: lookup.item,
-          stockBasis: context.stockBasis,
-          caseSensitive: context.caseSensitive,
-        });
+  if (context.signal?.aborted === true) abortedReason = 'cancelled';
 
-        if (!resolution.ok) {
-          return [normalizedSku, { kind: 'failed', code: resolution.failure }];
-        }
+  const outcomes: [string, SkuOutcome][] = uniqueSkus.map((normalizedSku) => {
+    if (bulkFailureCode !== null) {
+      return [normalizedSku, { kind: 'failed', code: bulkFailureCode }];
+    }
+    if (context.signal?.aborted === true) {
+      return [normalizedSku, { kind: 'failed', code: 'ZOHO_TEMPORARILY_UNAVAILABLE' }];
+    }
 
-        const snapshot: ResolvedSnapshot = {
-          ...resolution.item,
-          organizationId: context.organizationId,
-          organizationName: context.organizationName,
-          stockBasisType: context.stockBasis.type,
-          stockLocationId: context.stockBasis.locationId,
-          stockLocationName: context.stockBasis.locationName,
-          stockWarehouseId: context.stockBasis.warehouseId,
-          stockWarehouseName: context.stockBasis.warehouseName,
-          snapshotAt,
-        };
+    const lookup = lookups.get(normalizedSku);
 
-        return [
-          normalizedSku,
-          { kind: 'passed', zohoItemId: resolution.item.zohoItemId, snapshot },
-        ];
-      } catch (error) {
-        const code = zohoErrorToFailureCode(error);
+    // A SKU absent from the results was never matched, which is the same
+    // outcome as an explicit miss.
+    if (lookup === undefined || lookup.kind === 'not_found') {
+      return [normalizedSku, { kind: 'failed', code: 'SKU_NOT_FOUND' }];
+    }
+    if (lookup.kind === 'ambiguous') {
+      return [normalizedSku, { kind: 'failed', code: 'AMBIGUOUS_SKU' }];
+    }
+    // Section 15: this SKU alone failed; the rest of the batch is unaffected.
+    if (lookup.kind === 'error') {
+      return [normalizedSku, { kind: 'failed', code: zohoErrorToFailureCode(lookup.error) }];
+    }
 
-        // Section 32: broken authentication stops validation rather than
-        // burning every remaining row against a dead connection.
-        if (code === 'ZOHO_AUTHENTICATION_FAILED') {
-          abortedReason = 'zoho_authentication';
-          logInfo('import.validation_aborted', {
-            correlationId: context.correlationId,
-            reason: 'zoho_authentication',
-          });
-        }
-        return [normalizedSku, { kind: 'failed', code }];
-      }
-    },
-  );
+    const resolution = resolveItemSnapshot({
+      item: lookup.item,
+      stockBasis: context.stockBasis,
+      caseSensitive: context.caseSensitive,
+    });
+
+    if (!resolution.ok) {
+      return [normalizedSku, { kind: 'failed', code: resolution.failure }];
+    }
+
+    const snapshot: ResolvedSnapshot = {
+      ...resolution.item,
+      organizationId: context.organizationId,
+      organizationName: context.organizationName,
+      stockBasisType: context.stockBasis.type,
+      stockLocationId: context.stockBasis.locationId,
+      stockLocationName: context.stockBasis.locationName,
+      stockWarehouseId: context.stockBasis.warehouseId,
+      stockWarehouseName: context.stockBasis.warehouseName,
+      snapshotAt,
+    };
+
+    return [normalizedSku, { kind: 'passed', zohoItemId: resolution.item.zohoItemId, snapshot }];
+  });
 
   /* ---- Stage: build result -------------------------------------------- */
 
@@ -301,7 +320,7 @@ export const VALIDATION_STAGE_LABEL: Record<ValidationProgress['stage'], string>
   checking_cache: 'Checking local Zoho cache',
   fetching_items: 'Fetching items from Zoho',
   fetching_details: 'Fetching item details',
-  resolving_attributes: 'Resolving brand and manufacturer',
+  resolving_attributes: 'Resolving item attributes',
   resolving_stock_basis: 'Resolving stock basis',
   building_result: 'Building result',
 };

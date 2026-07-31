@@ -31,8 +31,6 @@ function activeItem(overrides: Partial<ZohoItemDetail> = {}): ZohoItemDetail {
     stock_on_hand: 120,
     unit: 'pcs',
     vendor_name: 'Metro Supplies',
-    brand: 'BoltCo',
-    manufacturer: 'BoltCo Industries',
     ...overrides,
   };
 }
@@ -49,8 +47,28 @@ function createReader(script: ReaderScript) {
     return entry as SkuLookupOutcome;
   });
 
+  // Delegates so the scripted outcomes — and thrown errors — reach the
+  // validator exactly as they did through the per-SKU path.
+  const lookupManyBySku = vi.fn(
+    async (skus: readonly string[]): Promise<Map<string, SkuLookupOutcome>> => {
+      const results = new Map<string, SkuLookupOutcome>();
+      for (const sku of skus) {
+        try {
+          results.set(sku, await lookupBySku(sku));
+        } catch (error) {
+          // Mirrors LiveBooksReader: auth breaks the whole run, anything else
+          // is isolated to the SKU that raised it.
+          if (error instanceof ZohoAuthenticationError) throw error;
+          results.set(sku, { kind: 'error', error });
+        }
+      }
+      return results;
+    },
+  );
+
   const reader: BooksReader = {
     lookupBySku,
+    lookupManyBySku,
     listOrganizations: vi.fn(async () => []),
     listLocations: vi.fn(async () => ({ locations: [], warehouses: [] })),
     testConnection: vi.fn(async () => ({ organizationName: 'Test Org', responseMs: 1 })),
@@ -95,8 +113,6 @@ describe('happy path', () => {
       sku: 'SKU-0001',
       stockInHand: 120,
       vendorName: 'Metro Supplies',
-      brandName: 'BoltCo',
-      manufacturerName: 'BoltCo Industries',
       unit: 'pcs',
       organizationId: '60000000001',
       stockBasisType: 'organization',
@@ -240,8 +256,6 @@ describe('optional fields never fail a row (section 16)', () => {
         item: activeItem({
           vendor_name: undefined,
           preferred_vendors: [],
-          brand: undefined,
-          manufacturer: undefined,
           unit: undefined,
         }),
       },
@@ -251,26 +265,8 @@ describe('optional fields never fail a row (section 16)', () => {
 
     expect(summary.passed).toBe(1);
     expect(summary.results[0]?.snapshot?.vendorName).toBeNull();
-    expect(summary.results[0]?.snapshot?.brandName).toBeNull();
     expect(summary.results[0]?.snapshot?.unit).toBeNull();
   });
-
-
-  it('falls back to a recognized custom field', async () => {
-    const { reader } = createReader({
-      'SKU-0001': {
-        kind: 'found',
-        item: activeItem({
-          brand: undefined,
-          custom_fields: [{ label: 'Brand', value: 'CustomBrand' }],
-        }),
-      },
-    });
-
-    const summary = await validateImportRows(rows(['SKU-0001']), { reader, ...CONTEXT_BASE });
-    expect(summary.results[0]?.snapshot?.brandName).toBe('CustomBrand');
-  });
-
 });
 
 describe('transient Zoho errors', () => {

@@ -40,6 +40,37 @@ import type {
 /** Section 32: bounded concurrency against Zoho. */
 export const ZOHO_CONCURRENCY = 4;
 
+/*
+ * Bulk-resolution tuning.
+ *
+ * Resolving a SKU one at a time costs TWO Zoho round trips (a search, then a
+ * detail fetch). At 1200+ SKUs that is ~2500 requests, which no serverless
+ * request budget accommodates — the function is killed and the browser gets a
+ * non-JSON error page.
+ *
+ * Paging the whole item catalogue instead costs `ceil(items / 200)` requests
+ * regardless of how many SKUs are being imported, so the cost stops scaling
+ * with the import and starts scaling with the catalogue.
+ */
+
+/** Zoho's maximum page size for /items. */
+const CATALOGUE_PAGE_SIZE = 200;
+
+/**
+ * Below this many unique SKUs, per-SKU lookups are cheaper than paging the
+ * whole catalogue — and they return richer per-item detail. Above it, the
+ * single catalogue sweep wins by an increasing margin.
+ */
+const BULK_LOOKUP_THRESHOLD = 25;
+
+/** Refuses to page forever if `has_more_page` never goes false. */
+const MAX_CATALOGUE_PAGES = 500;
+
+/** Breather between pages, so a long sweep does not trip Zoho's rate limiter. */
+const CATALOGUE_PAGE_DELAY_MS = 120;
+
+const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
 /* ---------------------------------------------------------- field helpers */
 
 function firstNonEmptyString(...candidates: unknown[]): string | null {
@@ -54,26 +85,6 @@ function toNumberOrNull(value: unknown): number | null {
   if (typeof value === 'string' && value.trim() !== '') {
     const parsed = Number(value);
     if (Number.isFinite(parsed)) return parsed;
-  }
-  return null;
-}
-
-/** Case/space-insensitive custom-field lookup, e.g. "Brand" or "cf_brand". */
-function customFieldValue(
-  item: { custom_fields?: { label?: string; api_name?: string; value?: unknown }[] } | undefined,
-  wanted: string,
-): string | null {
-  const normalize = (value: string): string => value.toLowerCase().replace(/[^a-z0-9]/g, '');
-  const target = normalize(wanted);
-
-  for (const field of item?.custom_fields ?? []) {
-    const label = normalize(field.label ?? '');
-    const apiName = normalize(field.api_name ?? '').replace(/^cf/, '');
-    if (label === target || apiName === target) {
-      const value = field.value;
-      if (typeof value === 'string' && value.trim() !== '') return value.trim();
-      if (typeof value === 'number') return String(value);
-    }
   }
   return null;
 }
@@ -114,15 +125,22 @@ export interface ResolvedZohoItem {
   normalizedSku: string;
   stockInHand: number;
   vendorName: string | null;
-  brandName: string | null;
-  manufacturerName: string | null;
   unit: string | null;
 }
 
 export type SkuLookupOutcome =
   | { kind: 'found'; item: ZohoItemDetail }
   | { kind: 'not_found' }
-  | { kind: 'ambiguous'; matchCount: number };
+  | { kind: 'ambiguous'; matchCount: number }
+  /**
+   * One SKU's lookup threw while the others succeeded.
+   *
+   * Only `lookupManyBySku` produces this — `lookupBySku` throws instead. It
+   * keeps section 15's rule intact: a single failing SKU must never fail the
+   * batch, so the error is carried back attached to the SKU that caused it
+   * rather than rejecting the whole call.
+   */
+  | { kind: 'error'; error: unknown };
 
 /**
  * The read surface the validator depends on. Both the live client and the mock
@@ -130,6 +148,19 @@ export type SkuLookupOutcome =
  */
 export interface BooksReader {
   lookupBySku(sku: string, correlationId: string): Promise<SkuLookupOutcome>;
+  /**
+   * Resolves MANY SKUs at once — see `LiveBooksReader.lookupManyBySku` for why
+   * this exists rather than the caller looping over `lookupBySku`.
+   */
+  lookupManyBySku(
+    skus: readonly string[],
+    correlationId: string,
+    options?: {
+      signal?: AbortSignal;
+      /** Forces per-SKU detail fetches, for data the list payload omits. */
+      requireDetail?: boolean;
+    },
+  ): Promise<Map<string, SkuLookupOutcome>>;
   listOrganizations(correlationId: string): Promise<ZohoOrganization[]>;
   listLocations(
     correlationId: string,
@@ -220,6 +251,99 @@ class LiveBooksReader implements BooksReader {
     return { kind: 'found', item: { ...summary, ...detail } };
   }
 
+  /**
+   * Resolves many SKUs with a cost that does not scale with the import size.
+   *
+   * For a large import this pages the entire item catalogue ONCE and matches
+   * locally, turning ~2N requests into `ceil(items / 200)`. A 1200-SKU import
+   * drops from roughly 2500 Zoho calls to about a dozen, which is the
+   * difference between a request that is killed mid-flight and one that
+   * finishes well inside the budget.
+   *
+   * The list payload carries everything a snapshot needs — `item_id`, `name`,
+   * `sku`, `status`, `product_type`, `track_inventory`, `stock_on_hand`,
+   * `unit`, `vendor_name`. It does NOT carry the per-location stock breakdown,
+   * so a location-based stock basis still needs the detail call and says so via
+   * `requireDetail`.
+   *
+   * Small imports keep the per-SKU path: pulling a whole catalogue to resolve
+   * five SKUs would be slower, not faster.
+   */
+  async lookupManyBySku(
+    skus: readonly string[],
+    correlationId: string,
+    options: { signal?: AbortSignal; requireDetail?: boolean } = {},
+  ): Promise<Map<string, SkuLookupOutcome>> {
+    const results = new Map<string, SkuLookupOutcome>();
+    const unique = [...new Set(skus.map((sku) => toNormalizedSku(sku)))].filter((s) => s !== '');
+    if (unique.length === 0) return results;
+
+    if (unique.length < BULK_LOOKUP_THRESHOLD || options.requireDetail === true) {
+      await mapWithConcurrency(unique, ZOHO_CONCURRENCY, async (sku) => {
+        if (options.signal?.aborted === true) return;
+        try {
+          results.set(sku, await this.lookupBySku(sku, correlationId));
+        } catch (error) {
+          // Broken authentication is not a per-SKU problem — every remaining
+          // lookup would fail the same way, so stop rather than burn them.
+          if (error instanceof ZohoAuthenticationError) throw error;
+          results.set(sku, { kind: 'error', error });
+        }
+      });
+      return results;
+    }
+
+    /* ---- one sweep of the catalogue ------------------------------------- */
+
+    const bySku = new Map<string, ZohoItemSummary[]>();
+
+    for (let page = 1; page <= MAX_CATALOGUE_PAGES; page += 1) {
+      if (options.signal?.aborted === true) break;
+
+      const response = await getWithAuthRetry<ZohoItemsListResponse>({
+        path: '/books/v3/items',
+        searchParams: { page, per_page: CATALOGUE_PAGE_SIZE },
+        correlationId,
+      });
+
+      for (const item of response.items ?? []) {
+        // Normalized the same way as the per-SKU path, so both agree on what
+        // counts as a match.
+        const normalized = toNormalizedSku(item.sku ?? '');
+        if (normalized === '') continue;
+        const existing = bySku.get(normalized);
+        if (existing === undefined) bySku.set(normalized, [item]);
+        else existing.push(item);
+      }
+
+      if (response.page_context?.has_more_page !== true) break;
+
+      if (page === MAX_CATALOGUE_PAGES) {
+        throw new ZohoUnexpectedResponseError(
+          `The Zoho catalogue exceeds ${MAX_CATALOGUE_PAGES * CATALOGUE_PAGE_SIZE} items; ` +
+            'import validation cannot page it in one request.',
+        );
+      }
+
+      await delay(CATALOGUE_PAGE_DELAY_MS);
+    }
+
+    for (const sku of unique) {
+      const matches = bySku.get(sku) ?? [];
+      if (matches.length === 0) {
+        results.set(sku, { kind: 'not_found' });
+      } else if (matches.length > 1) {
+        // Same rule as the per-SKU path: more than one exact match is genuinely
+        // ambiguous and must not be guessed at.
+        results.set(sku, { kind: 'ambiguous', matchCount: matches.length });
+      } else {
+        results.set(sku, { kind: 'found', item: matches[0] as ZohoItemDetail });
+      }
+    }
+
+    return results;
+  }
+
   async listOrganizations(correlationId: string): Promise<ZohoOrganization[]> {
     const response = await getWithAuthRetry<ZohoOrganizationsResponse>({
       path: '/books/v3/organizations',
@@ -285,22 +409,6 @@ export function resolveVendorName(item: ZohoItemDetail): string | null {
 }
 
 /**
- * Brand / manufacturer resolution priority — section 16:
- *   1. direct item-level value
- *   2. recognized custom field
- *   3. null (rendered as "Not available in Zoho" by the display helpers)
- *
- * The item-group tier the specification lists between these two is gone: Books
- * has no item groups, so there is no second record to fall back to.
- */
-export function resolveAttribute(
-  attribute: 'brand' | 'manufacturer',
-  item: ZohoItemDetail,
-): string | null {
-  return firstNonEmptyString(item[attribute], customFieldValue(item, attribute));
-}
-
-/**
  * Turns a Zoho item into the immutable snapshot stored on the import row.
  * Returns a typed failure instead of throwing so one bad row never fails the
  * whole import (section 15).
@@ -358,8 +466,6 @@ export function resolveItemSnapshot(params: {
       normalizedSku: toNormalizedSku(sku, { caseSensitive: params.caseSensitive }),
       stockInHand: stock.quantity,
       vendorName: resolveVendorName(item),
-      brandName: resolveAttribute('brand', item),
-      manufacturerName: resolveAttribute('manufacturer', item),
       unit: firstNonEmptyString(item.unit),
     },
   };

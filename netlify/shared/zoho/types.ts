@@ -49,8 +49,6 @@ export interface ZohoItemSummary {
   track_inventory?: boolean;
   stock_on_hand?: number | string;
   unit?: string;
-  brand?: string;
-  manufacturer?: string;
   group_name?: string;
 }
 

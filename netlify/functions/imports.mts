@@ -273,8 +273,6 @@ function toResultPayload(batch: ImportBatchRow, rows: Awaited<ReturnType<typeof 
       sku: row.resolved_snapshot_json?.sku ?? row.display_sku,
       zohoStock: row.resolved_snapshot_json?.stockInHand ?? 0,
       vendor: row.resolved_snapshot_json?.vendorName ?? null,
-      brand: row.resolved_snapshot_json?.brandName ?? null,
-      manufacturer: row.resolved_snapshot_json?.manufacturerName ?? null,
       unit: row.resolved_snapshot_json?.unit ?? null,
       stockBasisType: row.resolved_snapshot_json?.stockBasisType ?? batch.stock_basis_type,
       stockBasisName:

@@ -31,8 +31,6 @@ interface MockItemSpec {
   sku: string;
   stock: number;
   vendor?: string;
-  brand?: string;
-  manufacturer?: string;
   unit?: string;
   status?: 'active' | 'inactive';
   productType?: 'goods' | 'service';
@@ -41,16 +39,15 @@ interface MockItemSpec {
   omitPrimaryLocation?: boolean;
   /** Suppress every stock figure to exercise STOCK_QUANTITY_UNAVAILABLE. */
   omitStock?: boolean;
-  brandViaCustomField?: boolean;
 }
 
 const SPECS: MockItemSpec[] = [
-  { id: '1001', name: 'Hex Bolt M8 x 40mm', sku: 'SKU-0001', stock: 120, vendor: 'Metro Supplies', brand: 'BoltCo', manufacturer: 'BoltCo Industries', unit: 'pcs' },
+  { id: '1001', name: 'Hex Bolt M8 x 40mm', sku: 'SKU-0001', stock: 120, vendor: 'Metro Supplies', unit: 'pcs' },
   { id: '1002', name: 'Hex Nut M8', sku: 'SKU-0002', stock: 340, vendor: 'Metro Supplies', unit: 'pcs' },
   { id: '1003', name: 'Washer M8 Zinc', sku: 'SKU-0003', stock: 0, vendor: 'Metro Supplies', unit: 'pcs' },
   { id: '1004', name: 'Cyanoacrylate Adhesive 20g', sku: 'ABC-001', stock: 45, vendor: 'ChemDirect', unit: 'tube' },
   { id: '1005', name: 'Epoxy Resin Kit 500ml', sku: 'XYZ-002', stock: 18, vendor: 'ChemDirect', unit: 'kit' },
-  { id: '1006', name: 'Threadlocker Blue 10ml', sku: 'ABC-002', stock: 76, vendor: 'ChemDirect', brandViaCustomField: true, unit: 'bottle' },
+  { id: '1006', name: 'Threadlocker Blue 10ml', sku: 'ABC-002', stock: 76, vendor: 'ChemDirect', unit: 'bottle' },
   { id: '1007', name: 'Socket Cap Screw M6', sku: 'SKU-0007', stock: 210, vendor: 'Metro Supplies', unit: 'pcs' },
   { id: '1008', name: 'Spring Washer M6', sku: 'SKU-0008', stock: 158, unit: 'pcs' },
   { id: '1009', name: 'Machine Screw M4 x 12mm', sku: 'SKU-0009', stock: 500, vendor: 'FastFix', unit: 'pcs' },
@@ -108,15 +105,11 @@ function toDetail(spec: MockItemSpec): ZohoItemDetail {
     track_inventory: spec.trackInventory ?? true,
     stock_on_hand: spec.omitStock ? undefined : spec.stock,
     unit: spec.unit,
-    brand: spec.brandViaCustomField ? undefined : spec.brand,
-    manufacturer: spec.manufacturer,
     vendor_name: spec.vendor,
     preferred_vendors:
       spec.vendor === undefined ? [] : [{ vendor_id: `V-${spec.id}`, vendor_name: spec.vendor, is_primary: true }],
     locations,
-    custom_fields: spec.brandViaCustomField
-      ? [{ label: 'Brand', api_name: 'cf_brand', value: 'CustomFieldBrand' }]
-      : [],
+    custom_fields: [],
   };
 }
 
@@ -143,6 +136,23 @@ class MockBooksReader implements BooksReader {
     return { kind: 'found', item: toDetail(matches[0] as MockItemSpec) };
   }
 
+  /**
+   * The fixture set is already in memory, so there is no catalogue sweep to
+   * mirror here — the point of the live bulk path is avoiding HTTP, and there
+   * is none. Resolving each SKU keeps mock mode on exactly the same outcomes.
+   */
+  async lookupManyBySku(
+    skus: readonly string[],
+    correlationId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<Map<string, SkuLookupOutcome>> {
+    const results = new Map<string, SkuLookupOutcome>();
+    for (const sku of new Set(skus.map((value) => toNormalizedSku(value)))) {
+      if (sku === '' || options.signal?.aborted === true) continue;
+      results.set(sku, await this.lookupBySku(sku, correlationId));
+    }
+    return results;
+  }
 
   async listOrganizations(_correlationId: string): Promise<ZohoOrganization[]> {
     await delay(MOCK_LATENCY_MS);

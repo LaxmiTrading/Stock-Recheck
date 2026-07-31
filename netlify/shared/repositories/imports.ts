@@ -59,8 +59,6 @@ export interface ResolvedSnapshot {
   normalizedSku: string;
   stockInHand: number;
   vendorName: string | null;
-  brandName: string | null;
-  manufacturerName: string | null;
   unit: string | null;
   organizationId: string | null;
   organizationName: string | null;
@@ -306,7 +304,7 @@ export async function createItemsFromPassedRows(
   const result = await client.query(
     `INSERT INTO stock_recheck_items (
        stock_recheck_id, zoho_item_id, item_name, sku, normalized_sku,
-       zoho_stock_quantity, vendor_name, brand_name, manufacturer_name, unit,
+       zoho_stock_quantity, vendor_name, unit,
        zoho_snapshot_json
      )
      SELECT $1,
@@ -316,8 +314,6 @@ export async function createItemsFromPassedRows(
             r.resolved_snapshot_json ->> 'normalizedSku',
             (r.resolved_snapshot_json ->> 'stockInHand')::numeric,
             r.resolved_snapshot_json ->> 'vendorName',
-            r.resolved_snapshot_json ->> 'brandName',
-            r.resolved_snapshot_json ->> 'manufacturerName',
             r.resolved_snapshot_json ->> 'unit',
             r.resolved_snapshot_json
        FROM import_rows r

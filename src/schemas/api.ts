@@ -140,8 +140,6 @@ export const listItemsQuerySchema = z.object({
   workflowStatus: z.enum(ITEM_WORKFLOW_STATUSES).optional(),
   resultStatus: z.enum(RESULT_STATUSES).optional(),
   vendor: z.string().max(200).optional(),
-  brand: z.string().max(200).optional(),
-  manufacturer: z.string().max(200).optional(),
   claimedBy: uuidSchema.optional(),
   onlyMine: z.enum(['true', 'false']).optional(),
   sort: z.enum(SORT_KEYS).optional(),

@@ -148,7 +148,7 @@ export function resolveStockQuantity(
 export const VENDOR_FALLBACK = 'Not available in Zoho';
 /** Section 16 — a missing unit must not fail the import. */
 export const UNIT_FALLBACK = 'Not specified';
-/** Section 16 — missing brand/manufacturer must not fail the row. */
+/** Section 16 — a missing optional attribute must not fail the row. */
 export const ATTRIBUTE_FALLBACK = 'Not available in Zoho';
 
 export function displayVendor(value: string | null | undefined): string {

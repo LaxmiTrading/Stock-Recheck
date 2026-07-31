@@ -70,8 +70,6 @@ interface WorkspaceItem {
   sku: string;
   zohoStock: number | null;
   vendor: string | null;
-  brand: string | null;
-  manufacturer: string | null;
   unit: string | null;
   workflowStatus: ItemWorkflowStatus;
   resultStatus: ResultStatus;
@@ -91,8 +89,6 @@ interface ItemsResponse {
   items: WorkspaceItem[];
   facets: {
     vendors: string[];
-    brands: string[];
-    manufacturers: string[];
     claimants: { id: string; name: string }[];
   };
   pagination: { page: number; pageSize: number; total: number; totalPages: number };
@@ -156,8 +152,6 @@ export default function WorkspacePage(): React.JSX.Element {
   );
   const [resultStatus, setResultStatus] = useState<ResultStatus | ''>('');
   const [vendor, setVendor] = useState('');
-  const [brand, setBrand] = useState('');
-  const [manufacturer, setManufacturer] = useState('');
   const [claimedBy, setClaimedBy] = useState('');
   const [onlyMine, setOnlyMine] = useState(false);
 
@@ -187,14 +181,14 @@ export default function WorkspacePage(): React.JSX.Element {
 
   // Reset to page 1 whenever a filter changes, so the user is not stranded on
   // an out-of-range page.
-  useEffect(() => setPage(1), [debouncedSearch, workflowStatus, resultStatus, vendor, brand, manufacturer, claimedBy, onlyMine, pageSize]);
+  useEffect(() => setPage(1), [debouncedSearch, workflowStatus, resultStatus, vendor, claimedBy, onlyMine, pageSize]);
 
   // Selection is per-view. Carrying it across a page or filter change would
   // leave rows selected that the user can no longer see, and the bulk bar would
   // claim items they are not looking at.
   useEffect(
     () => setSelectedIds(new Set()),
-    [page, debouncedSearch, workflowStatus, resultStatus, vendor, brand, manufacturer, claimedBy, onlyMine, pageSize],
+    [page, debouncedSearch, workflowStatus, resultStatus, vendor, claimedBy, onlyMine, pageSize],
   );
 
   const recheckQuery = useQuery({
@@ -209,7 +203,7 @@ export default function WorkspacePage(): React.JSX.Element {
       'recheck',
       recheckId,
       'items',
-      { debouncedSearch, workflowStatus, resultStatus, vendor, brand, manufacturer, claimedBy, onlyMine, sort, direction, page, pageSize },
+      { debouncedSearch, workflowStatus, resultStatus, vendor, claimedBy, onlyMine, sort, direction, page, pageSize },
     ],
     queryFn: () =>
       apiRequest<ItemsResponse>(`/api/rechecks/${recheckId}/items`, {
@@ -218,8 +212,6 @@ export default function WorkspacePage(): React.JSX.Element {
           workflowStatus: workflowStatus || undefined,
           resultStatus: resultStatus || undefined,
           vendor: vendor || undefined,
-          brand: brand || undefined,
-          manufacturer: manufacturer || undefined,
           claimedBy: claimedBy || undefined,
           onlyMine: onlyMine ? 'true' : undefined,
           sort,
@@ -428,11 +420,9 @@ export default function WorkspacePage(): React.JSX.Element {
       workflowStatus !== '' ||
       resultStatus !== '' ||
       vendor !== '' ||
-      brand !== '' ||
-      manufacturer !== '' ||
       claimedBy !== '' ||
       onlyMine,
-    [debouncedSearch, workflowStatus, resultStatus, vendor, brand, manufacturer, claimedBy, onlyMine],
+    [debouncedSearch, workflowStatus, resultStatus, vendor, claimedBy, onlyMine],
   );
 
   const clearFilters = (): void => {
@@ -440,8 +430,6 @@ export default function WorkspacePage(): React.JSX.Element {
     setWorkflowStatus('');
     setResultStatus('');
     setVendor('');
-    setBrand('');
-    setManufacturer('');
     setClaimedBy('');
     setOnlyMine(false);
     setSearchParams({});
@@ -643,7 +631,7 @@ export default function WorkspacePage(): React.JSX.Element {
               <TextInput
                 id={inputId}
                 type="search"
-                placeholder="Item name, SKU, vendor, brand…"
+                placeholder="Item name, SKU, vendor…"
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
               />
@@ -734,34 +722,6 @@ export default function WorkspacePage(): React.JSX.Element {
                 <Select id={inputId} value={vendor} onChange={(e) => setVendor(e.target.value)}>
                   <option value="">All vendors</option>
                   {facets?.vendors.map((value) => (
-                    <option key={value} value={value}>
-                      {value}
-                    </option>
-                  ))}
-                </Select>
-              )}
-            </Field>
-            <Field label="Brand">
-              {({ inputId }) => (
-                <Select id={inputId} value={brand} onChange={(e) => setBrand(e.target.value)}>
-                  <option value="">All brands</option>
-                  {facets?.brands.map((value) => (
-                    <option key={value} value={value}>
-                      {value}
-                    </option>
-                  ))}
-                </Select>
-              )}
-            </Field>
-            <Field label="Manufacturer">
-              {({ inputId }) => (
-                <Select
-                  id={inputId}
-                  value={manufacturer}
-                  onChange={(e) => setManufacturer(e.target.value)}
-                >
-                  <option value="">All manufacturers</option>
-                  {facets?.manufacturers.map((value) => (
                     <option key={value} value={value}>
                       {value}
                     </option>
@@ -904,7 +864,6 @@ export default function WorkspacePage(): React.JSX.Element {
                   <th scope="col" className="px-3 py-2">SKU</th>
                   <th scope="col" className="px-3 py-2">Zoho Stock</th>
                   <th scope="col" className="px-3 py-2">Vendor</th>
-                  <th scope="col" className="px-3 py-2">Brand</th>
                   <th scope="col" className="px-3 py-2">Unit</th>
                   <th scope="col" className="px-3 py-2">Claimed By</th>
                   <th scope="col" className="px-3 py-2">Counted</th>
@@ -959,7 +918,6 @@ export default function WorkspacePage(): React.JSX.Element {
                       {item.zohoStock === null ? '—' : formatQuantity(item.zohoStock)}
                     </td>
                     <td className="px-3 py-2">{item.vendor ?? '—'}</td>
-                    <td className="px-3 py-2">{item.brand ?? '—'}</td>
                     <td className="px-3 py-2">{item.unit ?? '—'}</td>
                     <td className="px-3 py-2">
                       {item.claimedByName === null ? (

@@ -42,8 +42,6 @@ interface SeedItem {
   sku: string;
   stock: number;
   vendor: string | null;
-  brand: string | null;
-  manufacturer: string | null;
   unit: string;
   /** available | claimed | stale | submitted */
   state: 'available' | 'claimed' | 'stale' | 'submitted';
@@ -54,30 +52,30 @@ interface SeedItem {
 }
 
 const ITEMS: SeedItem[] = [
-  { zohoItemId: '1001', name: 'Hex Bolt M8 x 40mm', sku: 'SKU-0001', stock: 120, vendor: 'Metro Supplies', brand: 'BoltCo', manufacturer: 'BoltCo Industries', unit: 'pcs', state: 'submitted', counted: 120, actor: 1 },
-  { zohoItemId: '1002', name: 'Hex Nut M8', sku: 'SKU-0002', stock: 340, vendor: 'Metro Supplies', brand: 'BoltCo', manufacturer: 'BoltCo Industries', unit: 'pcs', state: 'submitted', counted: 338, actor: 1 },
-  { zohoItemId: '1003', name: 'Washer M8 Zinc', sku: 'SKU-0003', stock: 0, vendor: 'Metro Supplies', brand: 'BoltCo', manufacturer: null, unit: 'pcs', state: 'submitted', counted: 0, actor: 2 },
-  { zohoItemId: '1004', name: 'Cyanoacrylate Adhesive 20g', sku: 'ABC-001', stock: 45, vendor: 'ChemDirect', brand: 'StickWell', manufacturer: 'StickWell Ltd', unit: 'tube', state: 'available' },
-  { zohoItemId: '1005', name: 'Epoxy Resin Kit 500ml', sku: 'XYZ-002', stock: 18, vendor: 'ChemDirect', brand: 'StickWell', manufacturer: 'StickWell Ltd', unit: 'kit', state: 'available' },
-  { zohoItemId: '1006', name: 'Threadlocker Blue 10ml', sku: 'ABC-002', stock: 76, vendor: 'ChemDirect', brand: 'CustomFieldBrand', manufacturer: null, unit: 'bottle', state: 'claimed', actor: 1 },
-  { zohoItemId: '1007', name: 'Socket Cap Screw M6', sku: 'SKU-0007', stock: 210, vendor: 'Metro Supplies', brand: null, manufacturer: null, unit: 'pcs', state: 'stale', actor: 2 },
-  { zohoItemId: '1008', name: 'Spring Washer M6', sku: 'SKU-0008', stock: 158, vendor: null, brand: null, manufacturer: null, unit: 'pcs', state: 'available' },
-  { zohoItemId: '1009', name: 'Machine Screw M4 x 12mm', sku: 'SKU-0009', stock: 500, vendor: 'FastFix', brand: null, manufacturer: null, unit: 'pcs', state: 'submitted', counted: 503, actor: 2 },
-  { zohoItemId: '1010', name: 'Wing Nut M6', sku: 'SKU-0010', stock: 64, vendor: 'FastFix', brand: null, manufacturer: null, unit: 'pcs', state: 'available' },
-  { zohoItemId: '1011', name: 'Anchor Bolt 10mm', sku: 'SKU-0011', stock: 90, vendor: 'BuildRight', brand: null, manufacturer: null, unit: 'pcs', state: 'available' },
-  { zohoItemId: '1012', name: 'Self-Tapping Screw 4.2mm', sku: 'SKU-0012', stock: 430, vendor: 'BuildRight', brand: null, manufacturer: null, unit: 'pcs', state: 'available' },
-  { zohoItemId: '1013', name: 'Rivet Aluminium 4mm', sku: 'SKU-0013', stock: 1200, vendor: 'BuildRight', brand: null, manufacturer: null, unit: 'pcs', state: 'available' },
-  { zohoItemId: '1014', name: 'Cable Tie 200mm Black', sku: 'SKU-0014', stock: 800, vendor: 'ElectroParts', brand: null, manufacturer: null, unit: 'pcs', state: 'submitted', counted: 795, actor: 1 },
-  { zohoItemId: '1015', name: 'Heat Shrink Tube 6mm', sku: 'SKU-0015', stock: 240, vendor: 'ElectroParts', brand: null, manufacturer: null, unit: 'm', state: 'available' },
-  { zohoItemId: '1016', name: 'Insulation Tape Red', sku: 'SKU-0016', stock: 55, vendor: 'ElectroParts', brand: null, manufacturer: null, unit: 'roll', state: 'available' },
-  { zohoItemId: '1017', name: 'Grease Cartridge 400g', sku: 'SKU-0017', stock: 32, vendor: 'LubeMax', brand: null, manufacturer: null, unit: 'cartridge', state: 'available' },
-  { zohoItemId: '1018', name: 'Penetrating Oil 200ml', sku: 'SKU-0018', stock: 71, vendor: 'LubeMax', brand: null, manufacturer: null, unit: 'can', state: 'available' },
-  { zohoItemId: '1019', name: 'Safety Glasses Clear', sku: 'SKU-0019', stock: 26, vendor: 'SafeGear', brand: null, manufacturer: null, unit: 'pair', state: 'submitted', counted: 26, actor: 2 },
-  { zohoItemId: '1020', name: 'Nitrile Gloves Medium', sku: 'SKU-0020', stock: 340, vendor: 'SafeGear', brand: null, manufacturer: null, unit: 'box', state: 'available' },
+  { zohoItemId: '1001', name: 'Hex Bolt M8 x 40mm', sku: 'SKU-0001', stock: 120, vendor: 'Metro Supplies', unit: 'pcs', state: 'submitted', counted: 120, actor: 1 },
+  { zohoItemId: '1002', name: 'Hex Nut M8', sku: 'SKU-0002', stock: 340, vendor: 'Metro Supplies', unit: 'pcs', state: 'submitted', counted: 338, actor: 1 },
+  { zohoItemId: '1003', name: 'Washer M8 Zinc', sku: 'SKU-0003', stock: 0, vendor: 'Metro Supplies', unit: 'pcs', state: 'submitted', counted: 0, actor: 2 },
+  { zohoItemId: '1004', name: 'Cyanoacrylate Adhesive 20g', sku: 'ABC-001', stock: 45, vendor: 'ChemDirect', unit: 'tube', state: 'available' },
+  { zohoItemId: '1005', name: 'Epoxy Resin Kit 500ml', sku: 'XYZ-002', stock: 18, vendor: 'ChemDirect', unit: 'kit', state: 'available' },
+  { zohoItemId: '1006', name: 'Threadlocker Blue 10ml', sku: 'ABC-002', stock: 76, vendor: 'ChemDirect', unit: 'bottle', state: 'claimed', actor: 1 },
+  { zohoItemId: '1007', name: 'Socket Cap Screw M6', sku: 'SKU-0007', stock: 210, vendor: 'Metro Supplies', unit: 'pcs', state: 'stale', actor: 2 },
+  { zohoItemId: '1008', name: 'Spring Washer M6', sku: 'SKU-0008', stock: 158, vendor: null, unit: 'pcs', state: 'available' },
+  { zohoItemId: '1009', name: 'Machine Screw M4 x 12mm', sku: 'SKU-0009', stock: 500, vendor: 'FastFix', unit: 'pcs', state: 'submitted', counted: 503, actor: 2 },
+  { zohoItemId: '1010', name: 'Wing Nut M6', sku: 'SKU-0010', stock: 64, vendor: 'FastFix', unit: 'pcs', state: 'available' },
+  { zohoItemId: '1011', name: 'Anchor Bolt 10mm', sku: 'SKU-0011', stock: 90, vendor: 'BuildRight', unit: 'pcs', state: 'available' },
+  { zohoItemId: '1012', name: 'Self-Tapping Screw 4.2mm', sku: 'SKU-0012', stock: 430, vendor: 'BuildRight', unit: 'pcs', state: 'available' },
+  { zohoItemId: '1013', name: 'Rivet Aluminium 4mm', sku: 'SKU-0013', stock: 1200, vendor: 'BuildRight', unit: 'pcs', state: 'available' },
+  { zohoItemId: '1014', name: 'Cable Tie 200mm Black', sku: 'SKU-0014', stock: 800, vendor: 'ElectroParts', unit: 'pcs', state: 'submitted', counted: 795, actor: 1 },
+  { zohoItemId: '1015', name: 'Heat Shrink Tube 6mm', sku: 'SKU-0015', stock: 240, vendor: 'ElectroParts', unit: 'm', state: 'available' },
+  { zohoItemId: '1016', name: 'Insulation Tape Red', sku: 'SKU-0016', stock: 55, vendor: 'ElectroParts', unit: 'roll', state: 'available' },
+  { zohoItemId: '1017', name: 'Grease Cartridge 400g', sku: 'SKU-0017', stock: 32, vendor: 'LubeMax', unit: 'cartridge', state: 'available' },
+  { zohoItemId: '1018', name: 'Penetrating Oil 200ml', sku: 'SKU-0018', stock: 71, vendor: 'LubeMax', unit: 'can', state: 'available' },
+  { zohoItemId: '1019', name: 'Safety Glasses Clear', sku: 'SKU-0019', stock: 26, vendor: 'SafeGear', unit: 'pair', state: 'submitted', counted: 26, actor: 2 },
+  { zohoItemId: '1020', name: 'Nitrile Gloves Medium', sku: 'SKU-0020', stock: 340, vendor: 'SafeGear', unit: 'box', state: 'available' },
   // Leading zeros and an internal space: the two SKU shapes most likely to be
   // mangled by a spreadsheet round trip.
-  { zohoItemId: '1021', name: 'Leading Zero Part', sku: '0012345', stock: 12, vendor: 'FastFix', brand: null, manufacturer: null, unit: 'pcs', state: 'available' },
-  { zohoItemId: '1022', name: 'Internal Space Part', sku: 'PART 500 X', stock: 7, vendor: 'FastFix', brand: null, manufacturer: null, unit: 'pcs', state: 'available' },
+  { zohoItemId: '1021', name: 'Leading Zero Part', sku: '0012345', stock: 12, vendor: 'FastFix', unit: 'pcs', state: 'available' },
+  { zohoItemId: '1022', name: 'Internal Space Part', sku: 'PART 500 X', stock: 7, vendor: 'FastFix', unit: 'pcs', state: 'available' },
 ];
 
 /* ---------------------------------------------------------------- runner */
@@ -247,8 +245,6 @@ async function main(): Promise<void> {
         normalizedSku: toNormalizedSku(item.sku),
         stockInHand: item.stock,
         vendorName: item.vendor,
-        brandName: item.brand,
-        manufacturerName: item.manufacturer,
         unit: item.unit,
         stockBasisType: 'location',
         stockLocationId: MOCK_LOCATION_ID,
@@ -299,7 +295,7 @@ async function main(): Promise<void> {
       await client.query(
         `INSERT INTO stock_recheck_items (
            stock_recheck_id, zoho_item_id, item_name, sku, normalized_sku,
-           zoho_stock_quantity, vendor_name, brand_name, manufacturer_name, unit,
+           zoho_stock_quantity, vendor_name, unit,
            zoho_snapshot_json, workflow_status, result_status,
            claimed_by, claimed_at, claim_expires_at, claim_version,
            counted_quantity, quantity_difference, submitted_by, submitted_at
@@ -316,8 +312,6 @@ async function main(): Promise<void> {
           toNormalizedSku(item.sku),
           item.stock,
           item.vendor,
-          item.brand,
-          item.manufacturer,
           item.unit,
           JSON.stringify(snapshot),
           workflowStatus,

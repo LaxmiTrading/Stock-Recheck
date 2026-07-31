@@ -350,8 +350,6 @@ const listItemsHandler = async (request: Request, context: RouteContext): Promis
     workflowStatus: params.workflowStatus,
     resultStatus: params.resultStatus,
     vendor: params.vendor,
-    brand: params.brand,
-    manufacturer: params.manufacturer,
     claimedBy: params.claimedBy,
     onlyMine: params.onlyMine === 'true' ? actor.id : undefined,
     sortKey: params.sort ?? settings.defaultSort,
@@ -376,8 +374,6 @@ const listItemsHandler = async (request: Request, context: RouteContext): Promis
         zohoStock:
           hideZohoStock && item.workflow_status !== 'submitted' ? null : item.zoho_stock_quantity,
         vendor: item.vendor_name,
-        brand: item.brand_name,
-        manufacturer: item.manufacturer_name,
         unit: item.unit,
         workflowStatus: item.workflow_status,
         resultStatus: item.result_status,

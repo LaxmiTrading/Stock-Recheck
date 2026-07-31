@@ -31,8 +31,6 @@ interface PassedRow {
   sku: string;
   zohoStock: number;
   vendor: string | null;
-  brand: string | null;
-  manufacturer: string | null;
   unit: string | null;
   stockBasisType: string | null;
   stockBasisName: string | null;
@@ -230,8 +228,6 @@ export default function ImportResultPage(): React.JSX.Element {
                     <th scope="col" className="px-3 py-2">SKU</th>
                     <th scope="col" className="px-3 py-2">Zoho Stock</th>
                     <th scope="col" className="px-3 py-2">Vendor</th>
-                    <th scope="col" className="px-3 py-2">Brand</th>
-                    <th scope="col" className="px-3 py-2">Manufacturer</th>
                     <th scope="col" className="px-3 py-2">Unit</th>
                     <th scope="col" className="px-3 py-2">Stock Basis</th>
                     <th scope="col" className="px-3 py-2">Status</th>
@@ -247,8 +243,6 @@ export default function ImportResultPage(): React.JSX.Element {
                       <td className="px-3 py-2 font-mono">{row.sku}</td>
                       <td className="tabular px-3 py-2">{row.zohoStock}</td>
                       <td className="px-3 py-2">{row.vendor ?? 'Not available in Zoho'}</td>
-                      <td className="px-3 py-2">{row.brand ?? 'Not available in Zoho'}</td>
-                      <td className="px-3 py-2">{row.manufacturer ?? 'Not available in Zoho'}</td>
                       <td className="px-3 py-2">{row.unit ?? 'Not specified'}</td>
                       <td className="px-3 py-2 text-xs">
                         {row.stockBasisName ?? row.stockBasisType ?? '—'}

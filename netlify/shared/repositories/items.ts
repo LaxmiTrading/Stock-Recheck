@@ -47,8 +47,6 @@ export interface ItemRow {
   normalized_sku: string;
   zoho_stock_quantity: number;
   vendor_name: string | null;
-  brand_name: string | null;
-  manufacturer_name: string | null;
   unit: string | null;
   workflow_status: ItemWorkflowStatus;
   result_status: ResultStatus;
@@ -80,8 +78,6 @@ const ITEM_COLUMN_NAMES = [
   'normalized_sku',
   'zoho_stock_quantity',
   'vendor_name',
-  'brand_name',
-  'manufacturer_name',
   'unit',
   'workflow_status',
   'result_status',
@@ -143,8 +139,6 @@ export interface ItemListFilters {
   workflowStatus?: ItemWorkflowStatus;
   resultStatus?: ResultStatus;
   vendor?: string;
-  brand?: string;
-  manufacturer?: string;
   claimedBy?: string;
   onlyMine?: string;
   sortKey?: string;
@@ -181,8 +175,7 @@ export async function listItems(
     const placeholder = `$${values.length}`;
     conditions.push(
       `(i.item_name ILIKE ${placeholder} OR i.sku ILIKE ${placeholder}
-        OR i.vendor_name ILIKE ${placeholder} OR i.brand_name ILIKE ${placeholder}
-        OR i.manufacturer_name ILIKE ${placeholder})`,
+        OR i.vendor_name ILIKE ${placeholder})`,
     );
   }
   if (filters.workflowStatus !== undefined) {
@@ -190,10 +183,6 @@ export async function listItems(
   }
   if (filters.resultStatus !== undefined) addCondition('i.result_status = $?', filters.resultStatus);
   if (filters.vendor !== undefined) addCondition('i.vendor_name = $?', filters.vendor);
-  if (filters.brand !== undefined) addCondition('i.brand_name = $?', filters.brand);
-  if (filters.manufacturer !== undefined) {
-    addCondition('i.manufacturer_name = $?', filters.manufacturer);
-  }
   if (filters.claimedBy !== undefined) addCondition('i.claimed_by = $?', filters.claimedBy);
   if (filters.onlyMine !== undefined) {
     values.push(filters.onlyMine);
@@ -230,24 +219,12 @@ export async function listItems(
 /** Distinct values powering the workspace filter dropdowns. */
 export async function listFilterFacets(recheckId: string): Promise<{
   vendors: string[];
-  brands: string[];
-  manufacturers: string[];
   claimants: { id: string; name: string }[];
 }> {
-  const [vendors, brands, manufacturers, claimants] = await Promise.all([
+  const [vendors, claimants] = await Promise.all([
     queryMany<{ value: string }>(
       `SELECT DISTINCT vendor_name AS value FROM stock_recheck_items
         WHERE stock_recheck_id = $1 AND vendor_name IS NOT NULL ORDER BY value`,
-      [recheckId],
-    ),
-    queryMany<{ value: string }>(
-      `SELECT DISTINCT brand_name AS value FROM stock_recheck_items
-        WHERE stock_recheck_id = $1 AND brand_name IS NOT NULL ORDER BY value`,
-      [recheckId],
-    ),
-    queryMany<{ value: string }>(
-      `SELECT DISTINCT manufacturer_name AS value FROM stock_recheck_items
-        WHERE stock_recheck_id = $1 AND manufacturer_name IS NOT NULL ORDER BY value`,
       [recheckId],
     ),
     queryMany<{ id: string; name: string }>(
@@ -262,8 +239,6 @@ export async function listFilterFacets(recheckId: string): Promise<{
 
   return {
     vendors: vendors.map((row) => row.value),
-    brands: brands.map((row) => row.value),
-    manufacturers: manufacturers.map((row) => row.value),
     claimants,
   };
 }
@@ -319,7 +294,7 @@ export async function claimItemAtomically(params: {
                WHERE r.id = $2 AND r.status IN ('ready', 'in_progress')
             )
       RETURNING id, stock_recheck_id, zoho_item_id, item_name, sku, normalized_sku,
-                zoho_stock_quantity, vendor_name, brand_name, manufacturer_name, unit,
+                zoho_stock_quantity, vendor_name, unit,
                 workflow_status, result_status,
                 claimed_by, claimed_at, claim_expires_at, claim_version,
                 counted_quantity, quantity_difference, submitted_by, submitted_at,

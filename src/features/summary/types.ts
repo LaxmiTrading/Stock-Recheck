@@ -52,8 +52,6 @@ export interface SummaryItem {
   submittedByName: string | null;
   submittedAt: string | null;
   vendor: string | null;
-  brand: string | null;
-  manufacturer: string | null;
   unit: string | null;
 }
 
