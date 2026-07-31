@@ -18,6 +18,7 @@ import { actorCan, type Permission, type Role, type UserStatus } from '../../../
 import { queryOne } from '../database/client';
 import { signJwt, verifyJwt } from './jwt';
 import { newSessionId } from './password';
+import { isCrossSiteFrontend } from '../cors';
 
 export const SESSION_COOKIE_NAME = '__Host-sr_session';
 /** Local development over plain http cannot use the __Host- prefix. */
@@ -58,13 +59,31 @@ export function parseCookies(request: Request): Record<string, string> {
   return cookies;
 }
 
+/**
+ * `Lax` normally; `None` only when the UI is on a different origin.
+ *
+ * A cross-site request carries no cookie at all under `Lax`, so a separately
+ * hosted frontend cannot authenticate without `None`. That is a real loss —
+ * `Lax` is what stops another site's form post from riding the session — so it
+ * is opt-in via `FRONTEND_ORIGINS` rather than the default, and the CORS
+ * allow-list becomes the compensating control.
+ *
+ * `SameSite=None` is only honoured together with `Secure`; a browser drops the
+ * cookie otherwise. Over plain http (local development) we therefore stay on
+ * `Lax`, which is correct anyway because dev is same-origin through
+ * `netlify dev`.
+ */
+function sameSiteAttribute(): string {
+  return isCrossSiteFrontend() && isSecureContext() ? 'SameSite=None' : 'SameSite=Lax';
+}
+
 export function buildSessionCookie(token: string, maxAgeSeconds: number): string {
   const secure = isSecureContext();
   const attributes = [
     `${sessionCookieName()}=${encodeURIComponent(token)}`,
     'Path=/',
     'HttpOnly',
-    'SameSite=Lax',
+    sameSiteAttribute(),
     `Max-Age=${maxAgeSeconds}`,
   ];
   if (secure) attributes.push('Secure');
@@ -72,7 +91,15 @@ export function buildSessionCookie(token: string, maxAgeSeconds: number): string
 }
 
 export function buildClearSessionCookie(): string {
-  const attributes = [`${sessionCookieName()}=`, 'Path=/', 'HttpOnly', 'SameSite=Lax', 'Max-Age=0'];
+  const attributes = [
+    `${sessionCookieName()}=`,
+    'Path=/',
+    'HttpOnly',
+    // Must mirror the set-cookie attributes or the browser will not match and
+    // clear the existing cookie.
+    sameSiteAttribute(),
+    'Max-Age=0',
+  ];
   if (isSecureContext()) attributes.push('Secure');
   return attributes.join('; ');
 }

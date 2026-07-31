@@ -6,8 +6,30 @@
  * correlation ID, so error UI can be specific rather than generic.
  *
  * The session lives in an httpOnly cookie, so there is no token handling here
- * at all — `credentials: 'same-origin'` is the whole authentication story.
+ * at all — the credentials mode is the whole authentication story.
+ *
+ * `VITE_API_BASE_URL` lets the UI be served from a different origin than the
+ * API (GitHub Pages in front of a separately hosted backend). Left unset — the
+ * normal single-origin deployment — every request stays relative and same-origin,
+ * which is both simpler and safer.
  */
+
+/**
+ * Absolute origin of the API, or '' when it is served from this same origin.
+ *
+ * Baked in at BUILD time by Vite, not read at runtime: `import.meta.env` is
+ * statically replaced, so the deployed bundle must be built with the value it
+ * will use. A wrong value here fails every request, so it is normalised
+ * (trailing slashes stripped) rather than concatenated blindly.
+ */
+const API_BASE_URL: string = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '');
+
+/**
+ * Cross-origin requests need `include`; same-origin keeps the tighter
+ * `same-origin`. `include` also requires the server to send
+ * `Access-Control-Allow-Credentials: true` and a specific allow-origin.
+ */
+const CREDENTIALS_MODE: RequestCredentials = API_BASE_URL === '' ? 'same-origin' : 'include';
 
 export interface SuccessEnvelope<Data> {
   success: true;
@@ -73,13 +95,14 @@ export interface RequestOptions {
 }
 
 function buildUrl(path: string, searchParams?: RequestOptions['searchParams']): string {
-  if (searchParams === undefined) return path;
+  const target = `${API_BASE_URL}${path}`;
+  if (searchParams === undefined) return target;
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(searchParams)) {
     if (value !== undefined && value !== '') params.set(key, String(value));
   }
   const query = params.toString();
-  return query === '' ? path : `${path}?${query}`;
+  return query === '' ? target : `${target}?${query}`;
 }
 
 /**
@@ -109,7 +132,7 @@ export async function apiRequest<Data>(
           ? { accept: 'application/json' }
           : { accept: 'application/json', 'content-type': 'application/json' },
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
-      credentials: 'same-origin',
+      credentials: CREDENTIALS_MODE,
       signal: options.signal,
     });
   } catch (error) {
@@ -158,7 +181,7 @@ export async function apiDownload(
   try {
     response = await fetch(buildUrl(path, searchParams), {
       method: 'GET',
-      credentials: 'same-origin',
+      credentials: CREDENTIALS_MODE,
     });
   } catch {
     throw new NetworkError();

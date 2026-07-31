@@ -368,6 +368,7 @@ variable always takes precedence over the encrypted database copy.
 | `EMAIL_WEBHOOK_URL` | Optional | Endpoint that delivers invite/reset mail. |
 | `EMAIL_WEBHOOK_TOKEN` | Optional | Bearer token for that endpoint. |
 | `ZOHO_MOCK_MODE` | Optional | `true` uses local fixtures instead of Zoho. **Never in production.** |
+| `FRONTEND_ORIGINS` | Split hosting | Comma-separated origins allowed to call the API with credentials, e.g. `https://laxmitrading.github.io`. Leave unset for single-origin. See [Split hosting](#split-hosting-github-pages--netlify). |
 
 ¹ One of the two. `DATABASE_URL` wins when both are present.
 
@@ -521,7 +522,10 @@ npm run lint && npm run typecheck && npm test && npm run verify:readonly
 git push origin main     # Netlify builds and deploys
 ```
 
-Netlify runs `npm run build`, which type-checks then builds with Vite.
+Netlify runs `npm run build`, which type-checks then builds with Vite. That one
+origin serves both the UI and the API and needs no CORS configuration — the
+simplest and most secure arrangement. To serve the frontend from GitHub Pages
+instead, see [Split hosting](#split-hosting-github-pages--netlify) below.
 
 ### Deployment checklist
 
@@ -533,6 +537,68 @@ Netlify runs `npm run build`, which type-checks then builds with Vite.
 - [ ] Zoho connected and **Test Connection** passes
 - [ ] Stock basis configured
 - [ ] `npm run verify:readonly` passes
+
+### Split hosting: GitHub Pages + Netlify
+
+The default deployment serves the UI and the API from **one** Netlify origin,
+where the session cookie is same-site and no CORS is involved. Hosting the
+frontend on GitHub Pages splits that into two origins. GitHub Pages serves
+static files only — the functions in `netlify/` are **not** deployed by it, so
+the API keeps running on Netlify and pushing a backend change still requires a
+Netlify deploy.
+
+`.github/workflows/deploy-pages.yml` builds `dist/` and publishes it on every
+push to `main` that touches the frontend.
+
+**Understand the security trade-off before enabling this.** A cross-site request
+carries no cookie at all under `SameSite=Lax`, so the session cookie has to
+become `SameSite=None` — which is exactly the protection that stops another
+site's request from riding the session. `FRONTEND_ORIGINS` then becomes the only
+control left, and it is matched as an **exact string**: no wildcards, no
+subdomains, no prefixes. Put nothing in it you do not control. Where a single
+origin is acceptable, prefer it.
+
+Setup, in order:
+
+1. **Netlify** → Site configuration → Environment variables:
+
+   ```
+   FRONTEND_ORIGINS = https://laxmitrading.github.io
+   ```
+
+   No trailing slash. Setting this is what flips the cookie to `SameSite=None`
+   and turns the CORS headers on; leaving it empty keeps the stricter posture.
+   Redeploy the site for it to take effect.
+
+2. **GitHub** → the repository variable the build reads for its API origin:
+
+   ```bash
+   gh variable set API_BASE_URL --body 'https://<your-site>.netlify.app'
+   ```
+
+   This is a *variable*, not a secret — it is baked into the public bundle at
+   build time, which is fine because it is only a URL. The workflow fails fast
+   if it is missing rather than publishing a bundle that calls the wrong host.
+
+3. **GitHub** → Settings → Pages → **Source: GitHub Actions** (not "Deploy from
+   a branch").
+
+4. Push to `main`, then open `https://laxmitrading.github.io/Stock-Recheck/`.
+
+`APP_BASE_URL` stays pointed at the **Netlify** origin — it is what the API uses
+for OAuth redirects and to decide the cookie is on a secure context.
+
+Two things follow from Pages being a static host with no header control:
+
+- The security headers and CSP in `netlify.toml` do **not** apply to the Pages
+  copy; GitHub serves its own.
+- Deep links work through a `404.html` fallback the workflow copies from
+  `index.html`, since Pages has no equivalent of the SPA redirect rule.
+
+Third-party cookie restrictions apply to a cross-site session cookie. Safari's
+ITP and Firefox's strict mode block them by default, so users on those browsers
+may be unable to stay signed in. This is inherent to split hosting, not a bug in
+the configuration — single-origin hosting on Netlify avoids it entirely.
 
 ---
 
@@ -841,7 +907,7 @@ Restore to a **new** database first and verify before repointing production.
 |---|---|
 | Transport | HTTPS-only, HSTS |
 | Headers | CSP, `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy`, `Permissions-Policy` |
-| Sessions | HS256 JWT in an httpOnly + Secure + SameSite=Lax cookie; never in a URL or `localStorage` |
+| Sessions | HS256 JWT in an httpOnly + Secure + SameSite=Lax cookie; never in a URL or `localStorage`. Drops to `SameSite=None` only when `FRONTEND_ORIGINS` is set for [split hosting](#split-hosting-github-pages--netlify), where the origin allow-list becomes the compensating control |
 | Passwords | scrypt with a unique 32-byte salt; constant-time comparison |
 | Authentication errors | Deliberately generic — never reveal whether an email exists |
 | Timing | A dummy hash runs for unknown emails so response time does not leak account existence |

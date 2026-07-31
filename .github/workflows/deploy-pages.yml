@@ -1,0 +1,97 @@
+# Builds the React frontend and publishes it to GitHub Pages.
+#
+# Pages hosts STATIC FILES ONLY. The Netlify Functions under netlify/functions
+# are not deployed here and cannot be — the API keeps living on Netlify, and
+# this bundle is pointed at it through VITE_API_BASE_URL. Deploying the
+# frontend therefore does not deploy the backend; a change to netlify/ still
+# needs its own Netlify deploy.
+name: Deploy frontend to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    # A backend-only or docs-only change produces a byte-identical bundle, so
+    # skip the deploy rather than churn the Pages history.
+    paths-ignore:
+      - 'netlify/**'
+      - 'database/**'
+      - 'tests/**'
+      - '**/*.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  # Required by actions/deploy-pages to mint its OIDC deployment token.
+  id-token: write
+
+# Never let two deploys race to publish. In-progress runs are allowed to finish
+# rather than being cancelled, so a half-uploaded artifact can never win.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      # `import.meta.env` is substituted at BUILD time, so the API origin has to
+      # be correct here — it cannot be changed by editing anything on the Pages
+      # side afterwards. An unset variable would silently produce a bundle that
+      # requests https://<user>.github.io/api/... and 404s on every call, so
+      # fail loudly instead of publishing something broken.
+      - name: Require the API origin to be configured
+        if: vars.API_BASE_URL == ''
+        run: |
+          echo "::error::Repository variable API_BASE_URL is not set."
+          echo "Set it to the Netlify site origin (no trailing slash), e.g."
+          echo "  gh variable set API_BASE_URL --body 'https://<site>.netlify.app'"
+          echo "The frontend cannot reach the API without it."
+          exit 1
+
+      - name: Build
+        env:
+          VITE_API_BASE_URL: ${{ vars.API_BASE_URL }}
+          # Project sites are served from /<repo>/, so the bundle's absolute
+          # asset URLs must carry that prefix. Derived from the repository name
+          # so a rename cannot leave a stale path behind.
+          BASE_PATH: /${{ github.event.repository.name }}/
+        run: npm run build
+
+      # Pages has no SPA rewrite rule (the equivalent of netlify.toml's
+      # /* -> /index.html). Serving the same document as 404.html makes a deep
+      # link or a refresh on /rechecks/123 load the app instead of GitHub's
+      # error page; the router then resolves the path client-side.
+      - name: Add SPA fallback
+        run: cp dist/index.html dist/404.html
+
+      # Pages runs Jekyll by default, which strips files and folders beginning
+      # with an underscore. Vite does not emit any today, but a future chunk
+      # named _commonjsHelpers would vanish with no error at all.
+      - name: Disable Jekyll processing
+        run: touch dist/.nojekyll
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
