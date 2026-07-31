@@ -37,8 +37,11 @@ import { isValidBusinessDate } from '../../src/domain/recheckNumber';
 import { recordAuditEvent, recordAuditEventInTransaction } from '../shared/audit';
 import { requireActorWith, requireUser } from '../shared/auth/session';
 import { isUniqueViolation, withTransaction } from '../shared/database/client';
-import { createBooksReader, resolveItemSnapshot, ZOHO_CONCURRENCY } from '../shared/zoho/books';
-import { mapWithConcurrency } from '../shared/zoho/client';
+import {
+  createBooksReader,
+  resolveItemSnapshot,
+  type SkuLookupOutcome,
+} from '../shared/zoho/books';
 import { AppError, NotFoundError, ValidationError } from '../shared/errors';
 import { buildDifferenceWorkbook } from '../shared/excel/workbook';
 import {
@@ -550,37 +553,72 @@ const refreshStockHandler = async (request: Request, context: RouteContext): Pro
   const unresolved: { sku: string; reason: string }[] = [];
   const updates: StockRefreshUpdate[] = [];
 
-  await mapWithConcurrency(items, ZOHO_CONCURRENCY, async (item) => {
-    try {
-      const lookup = await reader.lookupBySku(item.normalized_sku, context.correlationId);
-      if (lookup.kind !== 'found') {
-        unresolved.push({ sku: item.sku, reason: lookup.kind === 'ambiguous' ? 'AMBIGUOUS_SKU' : 'SKU_NOT_FOUND' });
-        return;
-      }
+  /*
+   * ONE bulk resolution rather than a Zoho lookup per item.
+   *
+   * This is the same limit import validation hit: a lookup per item costs two
+   * Zoho round trips each, so refreshing a large recheck ran to thousands of
+   * requests and the platform killed the function mid-flight — the browser got
+   * a non-JSON error page instead of a result. `lookupManyBySku` pages the
+   * catalogue once instead, so the cost no longer scales with the recheck.
+   */
+  let lookups = new Map<string, SkuLookupOutcome>();
+  let bulkFailure: unknown = null;
 
-      const resolution = resolveItemSnapshot({
-        item: lookup.item,
-        stockBasis,
-        caseSensitive: settings.skuCaseSensitive,
-      });
-      if (!resolution.ok) {
-        unresolved.push({ sku: item.sku, reason: resolution.failure });
-        return;
-      }
+  try {
+    lookups = await reader.lookupManyBySku(
+      items.map((item) => item.normalized_sku),
+      context.correlationId,
+      // Only the detail payload carries the per-location breakdown.
+      { requireDetail: stockBasis.type !== 'organization' },
+    );
+  } catch (error) {
+    // Nothing resolved — reported per item below rather than thrown, so a
+    // refresh failure still returns the documented envelope.
+    bulkFailure = error;
+  }
 
-      updates.push({
-        itemId: item.id,
-        stockQuantity: resolution.item.stockInHand,
-        snapshot: lookup.item,
-      });
-    } catch (error) {
-      // One unreachable SKU must not abandon the rest of the refresh.
-      unresolved.push({
-        sku: item.sku,
-        reason: error instanceof AppError ? error.code : 'ZOHO_TEMPORARILY_UNAVAILABLE',
-      });
+  const reasonFor = (error: unknown): string =>
+    error instanceof AppError ? error.code : 'ZOHO_TEMPORARILY_UNAVAILABLE';
+
+  for (const item of items) {
+    if (bulkFailure !== null) {
+      unresolved.push({ sku: item.sku, reason: reasonFor(bulkFailure) });
+      continue;
     }
-  });
+
+    const lookup = lookups.get(item.normalized_sku);
+
+    if (lookup === undefined || lookup.kind === 'not_found') {
+      unresolved.push({ sku: item.sku, reason: 'SKU_NOT_FOUND' });
+      continue;
+    }
+    if (lookup.kind === 'ambiguous') {
+      unresolved.push({ sku: item.sku, reason: 'AMBIGUOUS_SKU' });
+      continue;
+    }
+    // One unreachable SKU must not abandon the rest of the refresh.
+    if (lookup.kind === 'error') {
+      unresolved.push({ sku: item.sku, reason: reasonFor(lookup.error) });
+      continue;
+    }
+
+    const resolution = resolveItemSnapshot({
+      item: lookup.item,
+      stockBasis,
+      caseSensitive: settings.skuCaseSensitive,
+    });
+    if (!resolution.ok) {
+      unresolved.push({ sku: item.sku, reason: resolution.failure });
+      continue;
+    }
+
+    updates.push({
+      itemId: item.id,
+      stockQuantity: resolution.item.stockInHand,
+      snapshot: lookup.item,
+    });
+  }
 
   const updated = await applyStockRefresh(recheckId, updates);
 
