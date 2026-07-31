@@ -12,6 +12,26 @@
   NODE_VERSION = "20"
   NPM_FLAGS = "--legacy-peer-deps=false"
 
+  #---------------------------------------------------------------------------
+  # Secrets scanning.
+  #
+  # Netlify fails the build when the VALUE of any environment variable appears
+  # in the build output. That is a genuinely useful check — it is what would
+  # catch a secret accidentally inlined into the client bundle — so it stays
+  # ON, and the real secrets stay scanned: AUTH_JWT_SECRET, ZOHO_TOKEN_KEY,
+  # ZOHO_CLIENT_SECRET, ZOHO_REFRESH_TOKEN, DATABASE_URL.
+  #
+  # Listed below are the variables that are configuration, not credentials, and
+  # whose values are short enough to collide with ordinary bundle contents by
+  # coincidence. `ZOHO_MOCK_MODE=false` is the worst offender: the string
+  # "false" occurs hundreds of times in any minified bundle and its sourcemap.
+  #
+  # Add a key here ONLY when leaking its value would be harmless. Never add a
+  # credential, and never reach for SECRETS_SCAN_ENABLED=false — that blinds
+  # the check for everything, including the values that matter.
+  #---------------------------------------------------------------------------
+  SECRETS_SCAN_OMIT_KEYS = "ZOHO_MOCK_MODE,APP_BASE_URL,AUTH_SESSION_SECONDS,ZOHO_ACCOUNTS_DOMAIN,ZOHO_API_DOMAIN,ZOHO_ORGANIZATION_ID"
+
 [functions]
   directory = "netlify/functions"
   node_bundler = "esbuild"
