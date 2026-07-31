@@ -4,21 +4,6 @@ import tailwindcss from '@tailwindcss/vite';
 import { fileURLToPath, URL } from 'node:url';
 
 export default defineConfig({
-  /*
-   * Public path the built assets are served under.
-   *
-   * Netlify serves the app from the domain root, so '/' is the default and
-   * nothing needs setting for that deployment. GitHub Pages project sites live
-   * under a repository sub-path (`/Stock-Recheck/`), and every asset URL in the
-   * bundle is absolute — with the wrong base the page loads and then 404s on
-   * its own JavaScript, which presents as a blank screen with no error.
-   *
-   * Set through the environment rather than hard-coded so ONE codebase builds
-   * correctly for both hosts; the Pages workflow passes BASE_PATH explicitly.
-   * The trailing slash is enforced because Vite joins this to asset names by
-   * concatenation, so '/Stock-Recheck' would emit '/Stock-Recheckassets/...'.
-   */
-  base: (process.env.BASE_PATH ?? '/').replace(/\/*$/, '/'),
   plugins: [react(), tailwindcss()],
   css: {
     /*

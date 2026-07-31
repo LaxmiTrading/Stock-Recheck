@@ -9,7 +9,6 @@
 import { randomUUID } from 'node:crypto';
 import type { z, ZodType } from 'zod';
 import { MethodNotAllowedError, toAppError, ValidationError, type AppError } from './errors';
-import { corsHeaders, preflightResponse } from './cors';
 
 export interface SuccessEnvelope<Data> {
   success: true;
@@ -264,48 +263,12 @@ export function withErrorHandling(routeName: string, handler: RouteHandler) {
       request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ??
       null;
 
-    /*
-     * Preflight is answered before the handler runs. A browser sends OPTIONS
-     * with no cookie and no body, so routing it into a handler would only
-     * produce a 401 or a 405 and fail the actual request that follows.
-     * Returns null unless a cross-site frontend is configured.
-     */
-    const preflight = preflightResponse(request);
-    if (preflight !== null) {
-      logInfo('request.preflight', {
-        correlationId,
-        route: routeName,
-        path: pathname,
-        status: preflight.status,
-      });
-      return preflight;
-    }
-
-    /*
-     * Applied to EVERY outcome below, including errors. A 401 or 500 without
-     * these headers is unreadable to the browser, so the operator would see an
-     * opaque network failure instead of the real message.
-     */
-    const withCors = (response: Response): Response => {
-      const extra = corsHeaders(request);
-      if (Object.keys(extra).length === 0) return response;
-      const headers = new Headers(response.headers);
-      for (const [key, value] of Object.entries(extra)) headers.set(key, value);
-      return new Response(response.body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers,
-      });
-    };
-
     try {
-      const response = withCors(
-        await handler(request, {
-          correlationId,
-          params: netlifyContext.params ?? {},
-          requestIp,
-        }),
-      );
+      const response = await handler(request, {
+        correlationId,
+        params: netlifyContext.params ?? {},
+        requestIp,
+      });
 
       logInfo('request.completed', {
         correlationId,
@@ -343,8 +306,7 @@ export function withErrorHandling(routeName: string, handler: RouteHandler) {
         });
       }
 
-      // Errors need the CORS headers too, or the browser hides the message.
-      return withCors(jsonFailure(appError, correlationId));
+      return jsonFailure(appError, correlationId);
     }
   };
 }
