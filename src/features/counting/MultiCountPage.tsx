@@ -399,14 +399,26 @@ export default function MultiCountPage(): React.JSX.Element {
    *
    * A local 1s tick, not a network poll — nothing is requested by this.
    */
+  /**
+   * Expiry as last reported by a heartbeat, which is newer than anything the
+   * items query holds — the lease is extended server-side between fetches.
+   */
+  const [heartbeatExpiry, setHeartbeatExpiry] = useState<string | null>(null);
+
   const soonestClaimExpiry = useMemo(() => {
     if (mode !== 'count') return null;
     const expiries = sessionItems
       .filter((item) => item.isClaimedByMe && item.claimExpiresAt !== null)
       .map((item) => new Date(item.claimExpiresAt as string).getTime())
       .filter((time) => Number.isFinite(time));
-    return expiries.length === 0 ? null : new Date(Math.min(...expiries)).toISOString();
-  }, [sessionItems, mode]);
+    if (expiries.length === 0) return null;
+
+    // Whichever is later: a heartbeat that has since renewed the lease, or the
+    // value the session loaded with.
+    const fromItems = Math.min(...expiries);
+    const fromBeat = heartbeatExpiry === null ? 0 : new Date(heartbeatExpiry).getTime();
+    return new Date(Math.max(fromItems, Number.isFinite(fromBeat) ? fromBeat : 0)).toISOString();
+  }, [sessionItems, mode, heartbeatExpiry]);
 
   const [leaseSecondsRemaining, setLeaseSecondsRemaining] = useState(0);
 
@@ -731,14 +743,36 @@ export default function MultiCountPage(): React.JSX.Element {
      * items alive that the operator had already released elsewhere.
      */
     const beat = async (): Promise<void> => {
-      await Promise.allSettled(
+      const results = await Promise.allSettled(
         sessionItems.map((item) =>
-          apiRequest(`/api/rechecks/${recheckId}/items/${item.id}/heartbeat`, {
-            method: 'POST',
-            body: { claimVersion: item.claimVersion },
-          }),
+          apiRequest<{ claimExpiresAt: string | null }>(
+            `/api/rechecks/${recheckId}/items/${item.id}/heartbeat`,
+            { method: 'POST', body: { claimVersion: item.claimVersion } },
+          ),
         ),
       );
+
+      /*
+       * Feed the renewed expiry back into the countdown.
+       *
+       * The heartbeat extends the lease on the SERVER; the items query is not
+       * polled, so without this the client keeps counting down from whatever
+       * expiry it loaded with and eventually announces "Timer expired" over a
+       * claim that is perfectly healthy — precisely the wrong alarm.
+       *
+       * The soonest renewed expiry is used, matching the displayed value: it is
+       * the first claim at risk. Rejected beats contribute nothing, so an item
+       * whose claim really is gone cannot push the timer back up.
+       */
+      const renewed = results
+        .filter(
+          (result): result is PromiseFulfilledResult<{ claimExpiresAt: string | null }> =>
+            result.status === 'fulfilled' && result.value.claimExpiresAt !== null,
+        )
+        .map((result) => new Date(result.value.claimExpiresAt as string).getTime())
+        .filter((time) => Number.isFinite(time));
+
+      if (renewed.length > 0) setHeartbeatExpiry(new Date(Math.min(...renewed)).toISOString());
     };
 
     const timer = setInterval(() => void beat(), heartbeatSeconds * 1000);

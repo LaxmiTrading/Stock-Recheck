@@ -931,8 +931,15 @@ export interface RemovedItemSummary {
  * are constrained to `available + in_progress + submitted = total`, so a fourth
  * state would mean changing the enum, that constraint, and every query, filter
  * and export that reads status — with one missed spot silently corrupting the
- * figures. An available item has never been counted, so there is no result,
- * attempt or difference to preserve; the audit event records what was removed.
+ * figures. The audit event records what was removed.
+ *
+ * The submission-history guard is NOT redundant with the status check.
+ * `reopenItem` returns an item to 'available' AND clears `submitted_at`, so a
+ * previously counted item looks exactly like a never-counted one — while its
+ * `count_submission_history` rows survive. Those cascade on delete, so without
+ * this an operator removing a reopened item would silently destroy the record
+ * of a count that genuinely happened, along with who made it and when. An item
+ * that has ever been counted stays part of the recheck.
  */
 export async function removeAvailableItems(
   recheckId: string,
@@ -942,12 +949,16 @@ export async function removeAvailableItems(
 
   return withTransaction(async (client) => {
     const result = await client.query<RemovedItemSummary>(
-      `DELETE FROM stock_recheck_items
-        WHERE stock_recheck_id = $1
-          AND id = ANY($2::uuid[])
-          AND workflow_status = 'available'
-          AND submitted_at IS NULL
-        RETURNING id, sku, item_name`,
+      `DELETE FROM stock_recheck_items i
+        WHERE i.stock_recheck_id = $1
+          AND i.id = ANY($2::uuid[])
+          AND i.workflow_status = 'available'
+          AND i.submitted_at IS NULL
+          AND NOT EXISTS (
+                SELECT 1 FROM count_submission_history h
+                 WHERE h.stock_recheck_item_id = i.id
+              )
+        RETURNING i.id, i.sku, i.item_name`,
       [recheckId, itemIds],
     );
 

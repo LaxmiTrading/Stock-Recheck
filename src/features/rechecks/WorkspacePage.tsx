@@ -265,8 +265,8 @@ export default function WorkspacePage(): React.JSX.Element {
           : {
               tone: 'warning',
               title: `${removed} removed, ${skipped} skipped`,
-              // Skipped means claimed or submitted between selecting and saving.
-              description: 'Items that were claimed or submitted in the meantime were kept.',
+              description:
+                'Kept: items claimed or submitted in the meantime, and any that have been counted before.',
             },
       );
     },
@@ -1181,8 +1181,9 @@ export default function WorkspacePage(): React.JSX.Element {
           <>
             {selectedCount === 1 ? 'This item' : 'These items'} will be taken out of{' '}
             <strong>{recheck.recheckNumber}</strong> and will no longer be counted. Only items
-            still <strong>Available</strong> can be removed — anything claimed or submitted in the
-            meantime is kept. The removal is recorded in the audit log.
+            still <strong>Available</strong> and never counted can be removed — anything claimed,
+            submitted, or previously counted and reopened is kept, so no counting record is ever
+            destroyed. The removal is recorded in the audit log.
           </>
         }
         onClose={() => setRemoveOpen(false)}
