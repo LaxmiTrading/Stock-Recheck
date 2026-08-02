@@ -8,6 +8,13 @@
  *   GET  /api/rechecks/:id/scannables   normalized SKU index for the scanner
  *   POST /api/rechecks/:id/cancel       administrator cancellation
  *   POST /api/rechecks/:id/refresh-stock  re-read Zoho stock for unsubmitted items
+ *   POST /api/rechecks/:id/add-items      validate and add SKUs to a live recheck
+ *   POST /api/rechecks/:id/remove-items   drop available items from a live recheck
+ *
+ * add-items / remove-items are named at the RECHECK level rather than under
+ * `/items/...` on purpose: claims.mts owns `/api/rechecks/:recheckId/items/
+ * :itemId`, which would also match `/items/remove` with itemId="remove". Two
+ * functions claiming overlapping paths is ambiguous, so these keep clear of it.
  *   GET  /api/rechecks/:id/summary      summary screen payload
  *   GET  /api/rechecks/:id/export.xlsx  difference workbook
  */
@@ -932,8 +939,8 @@ const routes: Route[] = [
   { method: 'GET', pattern: '/api/rechecks/:id/scannables', handler: listScannablesHandler },
   { method: 'POST', pattern: '/api/rechecks/:id/cancel', handler: cancelRecheckHandler },
   { method: 'POST', pattern: '/api/rechecks/:id/refresh-stock', handler: refreshStockHandler },
-  { method: 'POST', pattern: '/api/rechecks/:id/items/remove', handler: removeItemsHandler },
-  { method: 'POST', pattern: '/api/rechecks/:id/items/add', handler: addItemsHandler },
+  { method: 'POST', pattern: '/api/rechecks/:id/remove-items', handler: removeItemsHandler },
+  { method: 'POST', pattern: '/api/rechecks/:id/add-items', handler: addItemsHandler },
   { method: 'GET', pattern: '/api/rechecks/:id/summary', handler: summaryHandler },
   { method: 'GET', pattern: '/api/rechecks/:id/export.xlsx', handler: exportHandler },
 ];
@@ -958,6 +965,8 @@ export const config: Config = {
     // this function for paths declared in the config, so a route the internal
     // router handles but the config omits returns 404 without ever running.
     '/api/rechecks/:id/refresh-stock',
+    '/api/rechecks/:id/remove-items',
+    '/api/rechecks/:id/add-items',
     '/api/rechecks/:id/summary',
     '/api/rechecks/:id/export.xlsx',
   ],

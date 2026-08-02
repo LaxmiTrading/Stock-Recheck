@@ -252,7 +252,7 @@ export default function WorkspacePage(): React.JSX.Element {
   const removeItemsMutation = useMutation({
     mutationFn: (itemIds: string[]) =>
       apiRequest<{ removed: number; skipped: number }>(
-        `/api/rechecks/${recheckId}/items/remove`,
+        `/api/rechecks/${recheckId}/remove-items`,
         { method: 'POST', body: { itemIds } },
       ),
     onSuccess: async ({ removed, skipped }) => {
@@ -283,7 +283,7 @@ export default function WorkspacePage(): React.JSX.Element {
   const addItemsMutation = useMutation({
     mutationFn: (skus: string[]) =>
       apiRequest<{ added: number; alreadyPresent: number; failed: number }>(
-        `/api/rechecks/${recheckId}/items/add`,
+        `/api/rechecks/${recheckId}/add-items`,
         { method: 'POST', body: { skus } },
       ),
     onSuccess: async ({ added, alreadyPresent, failed }) => {
