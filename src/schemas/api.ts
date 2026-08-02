@@ -136,6 +136,15 @@ export const listRechecksQuerySchema = z.object({
 });
 
 export const listItemsQuerySchema = z.object({
+  /**
+   * Comma-separated item ids, for fetching a KNOWN set regardless of paging.
+   *
+   * The amend screen needs exactly the rows the operator selected. Without
+   * this it could only request one page of submitted items and filter locally,
+   * so on a recheck with more submitted items than fit a page, anything past
+   * the first page silently resolved to nothing and the editor opened empty.
+   */
+  ids: z.string().max(40 * 200).optional(),
   search: z.string().max(200).optional(),
   workflowStatus: z.enum(ITEM_WORKFLOW_STATUSES).optional(),
   resultStatus: z.enum(RESULT_STATUSES).optional(),

@@ -245,7 +245,14 @@ export default function MultiCountPage(): React.JSX.Element {
         searchParams:
           mode === 'count'
             ? { onlyMine: 'true', workflowStatus: 'counting_in_progress', pageSize: 200 }
-            : { workflowStatus: 'submitted', pageSize: 200 },
+            : // Ask for exactly the selected rows. Requesting one page of
+              // submitted items and filtering locally meant anything beyond
+              // that page resolved to nothing and the editor opened empty.
+              {
+                workflowStatus: 'submitted',
+                ids: amendIds.join(','),
+                pageSize: Math.max(1, amendIds.length),
+              },
       }),
   });
 

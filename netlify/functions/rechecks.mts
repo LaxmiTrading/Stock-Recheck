@@ -347,8 +347,22 @@ const listItemsHandler = async (request: Request, context: RouteContext): Promis
   const page = Math.max(1, Number.parseInt(params.page ?? '1', 10));
   const pageSize = clampPageSize(Number.parseInt(params.pageSize ?? String(DEFAULT_PAGE_SIZE), 10));
 
+  /*
+   * An explicit id list is a filter, not a bypass: it is still scoped to this
+   * recheck and still paged, so it cannot be used to read another recheck's
+   * rows. Blank entries are dropped so a trailing comma is harmless.
+   */
+  const ids =
+    params.ids === undefined
+      ? undefined
+      : params.ids
+          .split(',')
+          .map((value) => value.trim())
+          .filter((value) => value !== '');
+
   const { items, total } = await listItems({
     recheckId,
+    ids,
     search: params.search,
     workflowStatus: params.workflowStatus,
     resultStatus: params.resultStatus,

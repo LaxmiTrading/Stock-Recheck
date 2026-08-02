@@ -135,6 +135,8 @@ export async function listScannableItems(
 
 export interface ItemListFilters {
   recheckId: string;
+  /** Explicit item ids. Applied alongside the other filters, never instead. */
+  ids?: readonly string[];
   search?: string;
   workflowStatus?: ItemWorkflowStatus;
   resultStatus?: ResultStatus;
@@ -168,6 +170,12 @@ export async function listItems(
     values.push(value);
     conditions.push(sql.replace('$?', `$${values.length}`));
   };
+
+  // Parameterized array rather than an interpolated IN list, so the ids are
+  // never concatenated into SQL and the length is irrelevant to safety.
+  if (filters.ids !== undefined && filters.ids.length > 0) {
+    addCondition('i.id = ANY($?::uuid[])', filters.ids);
+  }
 
   if (filters.search !== undefined && filters.search.trim() !== '') {
     // ILIKE across the searchable columns; the GIN index backs the common case.

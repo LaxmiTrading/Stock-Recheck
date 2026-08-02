@@ -4,8 +4,8 @@
  * Desktop renders a table; below `md` the same rows become cards so nothing is
  * horizontally unusable on a phone (section 8.2).
  *
- * Polls every 4 seconds while visible and pauses when the tab is hidden
- * (section 33).
+ * Deliberately NOT polled: the data refreshes on action and on tab focus, so a
+ * table left open costs nothing while idle. See the items query below.
  */
 
 import { useEffect, useMemo, useState } from 'react';
@@ -30,7 +30,6 @@ import { PAGE_SIZE_OPTIONS, SORT_KEY_LABEL, SORT_KEYS, type SortKey } from '@/do
 import { useAuth } from '@/features/auth/AuthContext';
 import { ApiError, apiRequest } from '@/services/api';
 import { useDebouncedValue } from '@/hooks/useDebouncedValue';
-import { usePageVisibility } from '@/hooks/usePageVisibility';
 import {
   Badge,
   Button,
@@ -135,7 +134,6 @@ export default function WorkspacePage(): React.JSX.Element {
   const queryClient = useQueryClient();
   const toast = useToast();
   const { user } = useAuth();
-  const isVisible = usePageVisibility();
   const [searchParams, setSearchParams] = useSearchParams();
 
   const isAdmin = user !== null && isAdministrator(user.role);
@@ -163,10 +161,10 @@ export default function WorkspacePage(): React.JSX.Element {
   /*
    * Selected item ids for bulk claiming.
    *
-   * A Set keyed by id rather than an array of rows: the table re-fetches every
-   * four seconds, so holding row OBJECTS would pin stale copies of rows whose
-   * status has since changed. Ids stay valid across refetches and are all the
-   * bulk-claim endpoint needs.
+   * A Set keyed by id rather than an array of rows: holding row OBJECTS would
+   * pin stale copies of rows whose status has since changed by the next
+   * refetch. Ids stay valid across refetches and are all the bulk-claim
+   * endpoint needs.
    */
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
 
@@ -194,8 +192,6 @@ export default function WorkspacePage(): React.JSX.Element {
   const recheckQuery = useQuery({
     queryKey: ['recheck', recheckId],
     queryFn: () => apiRequest<RecheckResponse>(`/api/rechecks/${recheckId}`),
-    // Section 33: poll while visible, pause when hidden.
-    refetchInterval: isVisible ? 5000 : false,
   });
 
   const itemsQuery = useQuery({
@@ -220,8 +216,20 @@ export default function WorkspacePage(): React.JSX.Element {
           pageSize,
         },
       }),
-    refetchInterval: isVisible ? 4000 : false,
-    // Keeping the previous page visible avoids a flash of empty table on poll.
+    /*
+     * NOT polled.
+     *
+     * This table previously refetched every 4s (and the header every 5s) for as
+     * long as it was open, which burned function invocations and database
+     * queries while nobody was doing anything — the common case is a table left
+     * open on a warehouse tablet.
+     *
+     * Freshness now comes from actions instead: every mutation below
+     * invalidates ['recheck', recheckId], which covers both queries, and React
+     * Query refetches when the tab regains focus. So the data updates when the
+     * operator does something or comes back to it, and costs nothing when idle.
+     */
+    // Keeping the previous page visible avoids a flash of empty table on paging.
     placeholderData: (previous) => previous,
   });
 
