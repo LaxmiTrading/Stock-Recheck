@@ -62,12 +62,14 @@ import {
 import { createItemsFromPassedRows, findImportBatch } from '../shared/repositories/imports';
 import {
   applyStockRefresh,
+  expireStaleClaims,
   listFilterFacets,
   listItems,
   listItemsForExport,
   listRefreshableItems,
   listScannableItems,
   recalculateRecheckProgress,
+  refreshRecheckProgress,
   type StockRefreshUpdate,
 } from '../shared/repositories/items';
 import {
@@ -343,6 +345,39 @@ const listItemsHandler = async (request: Request, context: RouteContext): Promis
   const recheck = await loadRecheck(recheckId);
   const params = parseSearchParams(request, listItemsQuerySchema);
   const settings = await getSettings();
+
+  /*
+   * Opportunistic expiry sweep — the fix for claims that never came back.
+   *
+   * A claim lapses by TIME, but nothing was returning the row to Available:
+   * the sweep only ran when somebody CLAIMED something. With no new claims the
+   * items stayed 'counting_in_progress' indefinitely — still listed under
+   * "Resume counting", yet impossible to submit, because the server correctly
+   * refuses a lapsed claim. The only escape was releasing each item by hand.
+   *
+   * This read path is where anyone actually looks at a recheck, so it is the
+   * cheapest place to restore the truth. When nothing is stale it is one
+   * indexed SELECT returning no rows; the UPDATE only happens when there is
+   * something to fix, and `FOR UPDATE SKIP LOCKED` keeps concurrent sweeps off
+   * each other.
+   */
+  const expired = await expireStaleClaims(settings.staleClaimGraceSeconds);
+  for (const entry of expired) {
+    await recordAuditEvent({
+      eventType: 'item.claim_expired',
+      actorUserId: entry.previous_owner,
+      stockRecheckId: entry.stock_recheck_id,
+      stockRecheckItemId: entry.id,
+      metadata: { sweptBy: actor.id },
+      correlationId: context.correlationId,
+      requestIp: context.requestIp,
+    });
+  }
+  // Counters are cached on the recheck, so every recheck touched by the sweep
+  // needs recomputing — not just the one being viewed.
+  for (const affected of new Set(expired.map((entry) => entry.stock_recheck_id))) {
+    await refreshRecheckProgress(affected);
+  }
 
   const page = Math.max(1, Number.parseInt(params.page ?? '1', 10));
   const pageSize = clampPageSize(Number.parseInt(params.pageSize ?? String(DEFAULT_PAGE_SIZE), 10));
