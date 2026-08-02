@@ -32,6 +32,11 @@ import {
   type CountFilter,
   type CountRow,
 } from '@/domain/multiCount';
+import {
+  claimSecondsRemaining,
+  formatLeaseRemaining,
+  leaseHealth,
+} from '@/domain/claims';
 import { toNormalizedSku } from '@/domain/sku';
 import { isAdministrator } from '@/domain/permissions';
 import type { ItemWorkflowStatus, ResultStatus } from '@/domain/status';
@@ -70,12 +75,15 @@ interface SessionItem {
   resultStatus: ResultStatus;
   claimVersion: number;
   isClaimedByMe: boolean;
+  /** Drives the lease countdown; null once the item is no longer claimed. */
+  claimExpiresAt: string | null;
   countedQuantity: number | null;
   submittedAt: string | null;
 }
 
 interface ItemsResponse {
   items: SessionItem[];
+  pagination?: { total: number };
   isReadOnly: boolean;
 }
 
@@ -223,6 +231,26 @@ export default function MultiCountPage(): React.JSX.Element {
   /* Releasing throws away a count that exists nowhere else (section 2.3), so it
      asks first rather than acting on a single click of a small × . */
   const [releaseTarget, setReleaseTarget] = useState<CountRow | null>(null);
+
+  /**
+   * Rows ticked for a bulk action.
+   *
+   * Ids rather than rows, so a refetch that changes a row's counted quantity or
+   * state does not leave a stale copy pinned in the selection.
+   *
+   * An EMPTY selection means "all rows", which keeps the existing one-button
+   * "Submit N counts" behaviour intact for anyone who never ticks anything.
+   */
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
+
+  const toggleSelected = useCallback((itemId: string): void => {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(itemId)) next.delete(itemId);
+      else next.add(itemId);
+      return next;
+    });
+  }, []);
   const [amendReason, setAmendReason] = useState('');
   // Explicitly nullable so the ref CALLBACK can assign to `.current`; the
   // `useRef<HTMLInputElement>(null)` form types `current` as read-only.
@@ -362,7 +390,62 @@ export default function MultiCountPage(): React.JSX.Element {
     [sessionItems, countOf],
   );
 
+  /*
+   * Lease countdown for this counting session — section 20.
+   *
+   * The session holds several claims, each with its own expiry, so the SOONEST
+   * one is shown: that is the first work at risk, and a timer showing the
+   * healthiest claim would be reassuring right up until an item was lost.
+   *
+   * A local 1s tick, not a network poll — nothing is requested by this.
+   */
+  const soonestClaimExpiry = useMemo(() => {
+    if (mode !== 'count') return null;
+    const expiries = sessionItems
+      .filter((item) => item.isClaimedByMe && item.claimExpiresAt !== null)
+      .map((item) => new Date(item.claimExpiresAt as string).getTime())
+      .filter((time) => Number.isFinite(time));
+    return expiries.length === 0 ? null : new Date(Math.min(...expiries)).toISOString();
+  }, [sessionItems, mode]);
+
+  const [leaseSecondsRemaining, setLeaseSecondsRemaining] = useState(0);
+
+  useEffect(() => {
+    if (soonestClaimExpiry === null) {
+      setLeaseSecondsRemaining(0);
+      return;
+    }
+    const update = (): void =>
+      setLeaseSecondsRemaining(claimSecondsRemaining(soonestClaimExpiry));
+    update();
+    const timer = setInterval(update, 1000);
+    return () => clearInterval(timer);
+  }, [soonestClaimExpiry]);
+
+  const leaseExpired = soonestClaimExpiry !== null && leaseSecondsRemaining <= 0;
+  const leaseTone = leaseHealth(leaseSecondsRemaining, settings?.claimLeaseSeconds ?? 900);
+
+  /** The rows an action applies to: the ticked ones, or all when none are. */
+  const targetRows = useMemo(
+    () => (selectedIds.size === 0 ? rows : rows.filter((row) => selectedIds.has(row.itemId))),
+    [rows, selectedIds],
+  );
+  const hasSelection = selectedIds.size > 0;
+
+  // Drop ids whose rows have gone (submitted, released, or claim lost), so the
+  // count beside an action can never exceed what it would actually act on.
+  useEffect(() => {
+    setSelectedIds((current) => {
+      if (current.size === 0) return current;
+      const live = new Set(rows.map((row) => row.itemId));
+      const next = new Set([...current].filter((id) => live.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [rows]);
+
   const totals = useMemo(() => countTotals(rows), [rows]);
+  /** Totals for what the confirm dialog is actually about to write. */
+  const targetTotals = useMemo(() => countTotals(targetRows), [targetRows]);
   const visible = useMemo(() => visibleCountRows(rows, filter), [rows, filter]);
 
   const keyByItemId = useMemo(
@@ -488,6 +571,64 @@ export default function MultiCountPage(): React.JSX.Element {
   });
 
   /**
+   * Releases every ticked row, one request per item.
+   *
+   * Sequential and per-item for the same reason as submission: each release
+   * takes a row lock, and a partial failure has to name the rows that survived
+   * rather than collapsing into one opaque error. A row that fails stays
+   * claimed, which is the safe direction — the operator keeps the item.
+   */
+  const bulkReleaseMutation = useMutation({
+    mutationFn: async (targets: readonly CountRow[]) => {
+      const succeeded: string[] = [];
+      const failed: { itemName: string; message: string }[] = [];
+
+      for (const row of targets) {
+        try {
+          await apiRequest(`/api/rechecks/${recheckId}/items/${row.itemId}/release`, {
+            method: 'POST',
+            body: {},
+          });
+          succeeded.push(row.itemId);
+        } catch (error) {
+          failed.push({
+            itemName: row.itemName,
+            message: error instanceof ApiError ? error.message : 'Unexpected error.',
+          });
+        }
+      }
+      return { succeeded, failed };
+    },
+    onSuccess: async ({ succeeded, failed }) => {
+      // The local count for a released item is dropped: the claim is gone, so
+      // it could never be submitted (section 22).
+      for (const itemId of succeeded) local.discard(itemId);
+      setSelectedIds(new Set());
+      await queryClient.invalidateQueries({ queryKey: ['recheck', recheckId] });
+
+      toast.push(
+        failed.length === 0
+          ? {
+              tone: 'muted',
+              title: `${succeeded.length} item${succeeded.length === 1 ? '' : 's'} released`,
+            }
+          : {
+              tone: 'warning',
+              title: `${succeeded.length} released, ${failed.length} failed`,
+              description: `${failed[0]?.itemName}: ${failed[0]?.message}`,
+            },
+      );
+    },
+    onError: (error) => {
+      toast.push({
+        tone: 'danger',
+        title: 'Could not release the selected items',
+        description: error instanceof ApiError ? error.message : 'Try again.',
+      });
+    },
+  });
+
+  /**
    * Submits (or amends) every row, one request per item.
    *
    * Sequential rather than parallel: each carries its own idempotency key and
@@ -499,7 +640,7 @@ export default function MultiCountPage(): React.JSX.Element {
       const succeeded: string[] = [];
       const failed: { itemName: string; message: string }[] = [];
 
-      for (const row of rows) {
+      for (const row of targetRows) {
         const item = sessionItems.find((candidate) => candidate.id === row.itemId);
         if (item === undefined) continue;
         try {
@@ -531,12 +672,25 @@ export default function MultiCountPage(): React.JSX.Element {
         }
       }
 
-      return { succeeded, failed };
+      // Captured here, not read in onSuccess: by then the selection has been
+      // cleared and the answer would always be "everything".
+      return { succeeded, failed, coveredEverything: targetRows.length === rows.length };
     },
-    onSuccess: async ({ succeeded, failed }) => {
+    onSuccess: async ({ succeeded, failed, coveredEverything }) => {
       for (const itemId of succeeded) local.discard(itemId);
       setSubmitOpen(false);
+      setSelectedIds(new Set());
       await queryClient.invalidateQueries({ queryKey: ['recheck', recheckId] });
+
+      // Submitting only part of the session leaves work on this screen, so stay
+      // put; leaving would strand the rows the operator did not pick.
+      if (failed.length === 0 && !coveredEverything) {
+        toast.push({
+          tone: 'success',
+          title: `${succeeded.length} count${succeeded.length === 1 ? '' : 's'} submitted`,
+        });
+        return;
+      }
 
       if (failed.length === 0) {
         toast.push({
@@ -644,9 +798,40 @@ export default function MultiCountPage(): React.JSX.Element {
           <PackageIcon size={20} />
         </span>
         <div className="min-w-0 flex-1">
-          <h2 className="text-lg font-semibold">
-            {mode === 'count' ? 'Stock Count' : 'Correct Submitted Counts'}
-          </h2>
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-lg font-semibold">
+              {mode === 'count' ? 'Stock Count' : 'Correct Submitted Counts'}
+            </h2>
+            {/*
+              Claim countdown. Expiry is announced as text beside the timer
+              rather than a dialog: a modal here would land on top of the
+              scanner mid-count and interrupt work that is still recoverable,
+              since the heartbeat may yet renew the lease.
+            */}
+            {soonestClaimExpiry !== null && (
+              <span className="flex items-center gap-2">
+                <span
+                  className={clsx(
+                    'tabular rounded-lg px-2 py-0.5 text-sm font-semibold tracking-tight',
+                    leaseTone === 'healthy' && 'bg-[var(--color-success-bg)] text-[var(--color-success)]',
+                    leaseTone === 'expiring' && 'bg-[var(--color-warning-bg)] text-[var(--color-warning)]',
+                    leaseTone === 'expired' && 'bg-[var(--color-danger-bg)] text-[var(--color-danger)]',
+                  )}
+                  title="Time left on your claim. It renews automatically while this screen is open."
+                >
+                  {formatLeaseRemaining(leaseSecondsRemaining)}
+                </span>
+                {leaseExpired && (
+                  <span
+                    role="status"
+                    className="text-sm font-semibold text-[var(--color-danger)]"
+                  >
+                    Timer expired
+                  </span>
+                )}
+              </span>
+            )}
+          </div>
           <p className="text-sm text-[var(--color-ink-muted)]">
             {sessionLoading
               ? 'Loading your count…'
@@ -826,7 +1011,38 @@ export default function MultiCountPage(): React.JSX.Element {
             </div>
 
             {/* header row */}
-            <div className="grid grid-cols-[minmax(0,1fr)_130px_120px_92px_40px] gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-raised)] px-4 py-2.5 text-[11px] font-bold uppercase tracking-wide text-[var(--color-ink-subtle)]">
+            <div className="grid grid-cols-[32px_minmax(0,1fr)_130px_120px_92px_40px] gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-raised)] px-4 py-2.5 text-[11px] font-bold uppercase tracking-wide text-[var(--color-ink-subtle)]">
+              <div className="flex items-center">
+                <input
+                  type="checkbox"
+                  aria-label={
+                    visible.every((row) => selectedIds.has(row.itemId)) && visible.length > 0
+                      ? 'Clear selection'
+                      : 'Select all shown items'
+                  }
+                  className="h-4 w-4 cursor-pointer accent-[var(--color-brand)]"
+                  checked={visible.length > 0 && visible.every((row) => selectedIds.has(row.itemId))}
+                  // Some shown rows ticked, but not all.
+                  ref={(node) => {
+                    if (node !== null) {
+                      node.indeterminate =
+                        visible.some((row) => selectedIds.has(row.itemId)) &&
+                        !visible.every((row) => selectedIds.has(row.itemId));
+                    }
+                  }}
+                  onChange={(event) => {
+                    // Scoped to the VISIBLE rows, so a filter chip cannot
+                    // silently select rows the operator cannot see.
+                    const shown = visible.map((row) => row.itemId);
+                    setSelectedIds((current) => {
+                      const next = new Set(current);
+                      if (event.target.checked) for (const id of shown) next.add(id);
+                      else for (const id of shown) next.delete(id);
+                      return next;
+                    });
+                  }}
+                />
+              </div>
               <div>Item / SKU</div>
               <div className="text-center">Counted / Exp</div>
               <div className="text-center">Adjust</div>
@@ -850,10 +1066,19 @@ export default function MultiCountPage(): React.JSX.Element {
                   <li
                     key={row.itemId}
                     className={clsx(
-                      'animate-row-in grid grid-cols-[minmax(0,1fr)_130px_120px_92px_40px] items-center gap-2 border-b border-l-[3px] border-[var(--color-border)] px-4 py-3 transition-colors hover:bg-[var(--color-row-hover)]',
+                      'animate-row-in grid grid-cols-[32px_minmax(0,1fr)_130px_120px_92px_40px] items-center gap-2 border-b border-l-[3px] border-[var(--color-border)] px-4 py-3 transition-colors hover:bg-[var(--color-row-hover)]',
                       accent,
                     )}
                   >
+                    <div className="flex items-center">
+                      <input
+                        type="checkbox"
+                        aria-label={`Select ${row.itemName}`}
+                        className="h-4 w-4 cursor-pointer accent-[var(--color-brand)]"
+                        checked={selectedIds.has(row.itemId)}
+                        onChange={() => toggleSelected(row.itemId)}
+                      />
+                    </div>
                     <div className="min-w-0">
                       <div className="truncate text-sm font-medium">{row.itemName}</div>
                       <div className="font-mono text-xs text-[var(--color-ink-muted)]">
@@ -953,16 +1178,34 @@ export default function MultiCountPage(): React.JSX.Element {
                 </>
               )}
             </div>
-            <Button
-              variant="primary"
-              size="lg"
-              disabled={!canSave}
-              onClick={() => setSubmitOpen(true)}
-            >
-              {mode === 'count'
-                ? `Submit ${totals.items} count${totals.items === 1 ? '' : 's'}`
-                : `Save ${totals.items} correction${totals.items === 1 ? '' : 's'}`}
-            </Button>
+            <div className="flex flex-wrap items-center gap-2">
+              {/*
+                Release is offered only for a real selection. With nothing
+                ticked "release" would mean the whole session, which is a far
+                more destructive reading of an empty selection than submit's.
+              */}
+              {mode === 'count' && hasSelection && (
+                <Button
+                  size="lg"
+                  onClick={() => bulkReleaseMutation.mutate(targetRows)}
+                  loading={bulkReleaseMutation.isPending}
+                  loadingText="Releasing…"
+                  disabled={submitMutation.isPending}
+                >
+                  {`Release ${targetRows.length}`}
+                </Button>
+              )}
+              <Button
+                variant="primary"
+                size="lg"
+                disabled={!canSave || bulkReleaseMutation.isPending || targetRows.length === 0}
+                onClick={() => setSubmitOpen(true)}
+              >
+                {mode === 'count'
+                  ? `Submit ${targetRows.length} count${targetRows.length === 1 ? '' : 's'}`
+                  : `Save ${targetRows.length} correction${targetRows.length === 1 ? '' : 's'}`}
+              </Button>
+            </div>
           </Card>
 
           {!canSave && (
@@ -1029,16 +1272,24 @@ export default function MultiCountPage(): React.JSX.Element {
         title={mode === 'count' ? 'Submit these counts?' : 'Save these corrections?'}
         description={
           <>
-            {totals.items} item{totals.items === 1 ? '' : 's'} · {totals.counted} pieces counted
-            against {totals.expected} expected.{' '}
-            {totals.discrepancy > 0 && (
+            {targetTotals.items} item{targetTotals.items === 1 ? '' : 's'} ·{' '}
+            {targetTotals.counted} pieces counted against {targetTotals.expected} expected.{' '}
+            {targetTotals.discrepancy > 0 && (
               <strong>
-                {totals.discrepancy} row{totals.discrepancy === 1 ? '' : 's'} differ from Zoho.
+                {targetTotals.discrepancy} row{targetTotals.discrepancy === 1 ? '' : 's'} differ
+                from Zoho.
               </strong>
             )}{' '}
-            {mode === 'count' && totals.untouched > 0 && (
+            {mode === 'count' && targetTotals.untouched > 0 && (
               <>
-                {totals.untouched} row{totals.untouched === 1 ? '' : 's'} would be submitted as zero.
+                {targetTotals.untouched} row{targetTotals.untouched === 1 ? '' : 's'} would be
+                submitted as zero.
+              </>
+            )}{' '}
+            {hasSelection && (
+              <>
+                The remaining {rows.length - targetRows.length} row
+                {rows.length - targetRows.length === 1 ? '' : 's'} stay claimed and uncounted.
               </>
             )}
           </>
@@ -1054,7 +1305,11 @@ export default function MultiCountPage(): React.JSX.Element {
               disabled={!amendReasonValid}
               onClick={() => submitMutation.mutate()}
             >
-              {mode === 'count' ? 'Submit all' : 'Save corrections'}
+              {mode === 'count'
+                ? hasSelection
+                  ? `Submit ${targetRows.length}`
+                  : 'Submit all'
+                : 'Save corrections'}
             </Button>
           </>
         }

@@ -234,6 +234,26 @@ export default function WorkspacePage(): React.JSX.Element {
   });
 
   /**
+   * How many items THIS user is mid-count on, across the whole recheck.
+   *
+   * Deliberately its own request rather than a scan of the loaded rows: the
+   * table shows one page of a recheck that may hold thousands, so deriving this
+   * from `items` made "Resume counting" appear only when a claimed row happened
+   * to fall on the page being viewed. The operator then had to hunt for their
+   * own item before the button offering to take them to it would show up.
+   *
+   * `pageSize: 1` because only the total is wanted; the row itself is unused.
+   */
+  const myClaimsQuery = useQuery({
+    queryKey: ['recheck', recheckId, 'my-claims'],
+    queryFn: () =>
+      apiRequest<ItemsResponse>(`/api/rechecks/${recheckId}/items`, {
+        searchParams: { onlyMine: 'true', workflowStatus: 'counting_in_progress', pageSize: 1 },
+      }),
+  });
+  const myClaimCount = myClaimsQuery.data?.pagination.total ?? 0;
+
+  /**
    * Bulk claim (section 20). The endpoint claims each id atomically and reports
    * per-item outcomes rather than failing the whole batch, so a race on one row
    * never costs the user the rest of their selection.
@@ -488,10 +508,10 @@ export default function WorkspacePage(): React.JSX.Element {
       : (KIND_PRIORITY.find((kind) => items.some((item) => kindOf(item) === kind)) ?? null);
 
   const kindTargets = items.filter((item) => kindOf(item) === activeKind);
-  /* Whether THIS user has anything mid-count. `counts.inProgressItems` counts
-     every user's claims, so it would offer a counting screen to someone
-     holding nothing. */
-  const hasMyClaims = items.some((item) => kindOf(item) === 'resume');
+  /* Whether THIS user has anything mid-count, anywhere in the recheck.
+     `counts.inProgressItems` counts every user's claims, so it would offer a
+     counting screen to someone holding nothing. */
+  const hasMyClaims = myClaimCount > 0;
   const pagination = itemsQuery.data?.pagination;
 
   return (
@@ -545,7 +565,9 @@ export default function WorkspacePage(): React.JSX.Element {
                 variant="primary"
                 icon={<PackageIcon size={15} />}
               >
-                Resume counting
+                {myClaimCount === 1
+                  ? 'Resume counting'
+                  : `Resume counting (${myClaimCount})`}
               </LinkButton>
             )}
             {isAdmin && !recheck.isReadOnly && (
