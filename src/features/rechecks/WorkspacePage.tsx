@@ -56,6 +56,7 @@ import {
   LayersIcon,
   PackageIcon,
   PencilIcon,
+  PlusIcon,
   RefreshIcon,
   SearchIcon,
   UserIcon,
@@ -157,6 +158,9 @@ export default function WorkspacePage(): React.JSX.Element {
   const [cancelReason, setCancelReason] = useState('');
   const [releaseTarget, setReleaseTarget] = useState<WorkspaceItem | null>(null);
   const [releaseReason, setReleaseReason] = useState('');
+  const [removeOpen, setRemoveOpen] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  const [addText, setAddText] = useState('');
 
   /*
    * Selected item ids for bulk claiming.
@@ -244,6 +248,69 @@ export default function WorkspacePage(): React.JSX.Element {
    *
    * `pageSize: 1` because only the total is wanted; the row itself is unused.
    */
+  /** Removes the selected AVAILABLE items. The server enforces that guard too. */
+  const removeItemsMutation = useMutation({
+    mutationFn: (itemIds: string[]) =>
+      apiRequest<{ removed: number; skipped: number }>(
+        `/api/rechecks/${recheckId}/items/remove`,
+        { method: 'POST', body: { itemIds } },
+      ),
+    onSuccess: async ({ removed, skipped }) => {
+      setRemoveOpen(false);
+      setSelectedIds(new Set());
+      await queryClient.invalidateQueries({ queryKey: ['recheck', recheckId] });
+      toast.push(
+        skipped === 0
+          ? { tone: 'success', title: `${removed} item${removed === 1 ? '' : 's'} removed` }
+          : {
+              tone: 'warning',
+              title: `${removed} removed, ${skipped} skipped`,
+              // Skipped means claimed or submitted between selecting and saving.
+              description: 'Items that were claimed or submitted in the meantime were kept.',
+            },
+      );
+    },
+    onError: (error) => {
+      toast.push({
+        tone: 'danger',
+        title: 'Could not remove the items',
+        description: error instanceof ApiError ? error.message : 'Try again.',
+      });
+    },
+  });
+
+  /** Validates pasted SKUs against Zoho and adds those that pass. */
+  const addItemsMutation = useMutation({
+    mutationFn: (skus: string[]) =>
+      apiRequest<{ added: number; alreadyPresent: number; failed: number }>(
+        `/api/rechecks/${recheckId}/items/add`,
+        { method: 'POST', body: { skus } },
+      ),
+    onSuccess: async ({ added, alreadyPresent, failed }) => {
+      setAddOpen(false);
+      setAddText('');
+      await queryClient.invalidateQueries({ queryKey: ['recheck', recheckId] });
+
+      const notes = [
+        alreadyPresent > 0 ? `${alreadyPresent} already in this recheck` : null,
+        failed > 0 ? `${failed} could not be validated against Zoho` : null,
+      ].filter((note) => note !== null);
+
+      toast.push({
+        tone: added > 0 ? 'success' : 'warning',
+        title: `${added} item${added === 1 ? '' : 's'} added`,
+        description: notes.length > 0 ? notes.join(' · ') : undefined,
+      });
+    },
+    onError: (error) => {
+      toast.push({
+        tone: 'danger',
+        title: 'Could not add the items',
+        description: error instanceof ApiError ? error.message : 'Try again.',
+      });
+    },
+  });
+
   const myClaimsQuery = useQuery({
     queryKey: ['recheck', recheckId, 'my-claims'],
     queryFn: () =>
@@ -571,6 +638,11 @@ export default function WorkspacePage(): React.JSX.Element {
               </LinkButton>
             )}
             {isAdmin && !recheck.isReadOnly && (
+              <Button onClick={() => setAddOpen(true)} icon={<PlusIcon size={15} />}>
+                Add items
+              </Button>
+            )}
+            {isAdmin && !recheck.isReadOnly && (
               <Button
                 onClick={() => refreshStockMutation.mutate()}
                 loading={refreshStockMutation.isPending}
@@ -815,6 +887,21 @@ export default function WorkspacePage(): React.JSX.Element {
             <Button size="sm" onClick={() => setSelectedIds(new Set())}>
               Clear
             </Button>
+            {/*
+              * Removal rides on a CLAIM selection rather than being its own
+              * selection kind: the rows it applies to are exactly the available
+              * ones, and a separate kind would make every available row belong
+              * to two kinds at once, which the single-kind rule forbids.
+              */}
+            {activeKind === 'claim' && isAdmin && (
+              <Button
+                size="sm"
+                onClick={() => setRemoveOpen(true)}
+                disabled={bulkClaimMutation.isPending || removeItemsMutation.isPending}
+              >
+                Remove from recheck
+              </Button>
+            )}
             {/*
               * Exactly one action, matching the kind of what is selected.
               * Showing "Claim" and "Edit" side by side — which happened when a
@@ -1085,6 +1172,84 @@ export default function WorkspacePage(): React.JSX.Element {
       )}
 
       {/* --------------------------------------------------- cancel dialog */}
+      {/* ------------------------------------------------- remove items */}
+      <Dialog
+        open={removeOpen}
+        tone="warning"
+        title={`Remove ${selectedCount} item${selectedCount === 1 ? '' : 's'}?`}
+        description={
+          <>
+            {selectedCount === 1 ? 'This item' : 'These items'} will be taken out of{' '}
+            <strong>{recheck.recheckNumber}</strong> and will no longer be counted. Only items
+            still <strong>Available</strong> can be removed — anything claimed or submitted in the
+            meantime is kept. The removal is recorded in the audit log.
+          </>
+        }
+        onClose={() => setRemoveOpen(false)}
+        footer={
+          <>
+            <Button onClick={() => setRemoveOpen(false)}>Back</Button>
+            <Button
+              variant="danger"
+              loading={removeItemsMutation.isPending}
+              loadingText="Removing…"
+              onClick={() => removeItemsMutation.mutate(selectedItems.map((item) => item.id))}
+            >
+              Remove {selectedCount}
+            </Button>
+          </>
+        }
+      />
+
+      {/* ---------------------------------------------------- add items */}
+      <Dialog
+        open={addOpen}
+        title="Add items to this Stock Recheck"
+        description={
+          <>
+            One SKU per line. Each is validated against Zoho using{' '}
+            <strong>this recheck&rsquo;s</strong> stock basis, so added rows are measured the same
+            way as the existing ones. SKUs already present are skipped.
+          </>
+        }
+        onClose={() => setAddOpen(false)}
+        footer={
+          <>
+            <Button onClick={() => setAddOpen(false)}>Cancel</Button>
+            <Button
+              variant="primary"
+              loading={addItemsMutation.isPending}
+              loadingText="Validating with Zoho…"
+              disabled={addText.trim() === ''}
+              onClick={() =>
+                addItemsMutation.mutate(
+                  addText
+                    .split(/[\r\n,]+/)
+                    .map((value) => value.trim())
+                    .filter((value) => value !== ''),
+                )
+              }
+            >
+              Validate and add
+            </Button>
+          </>
+        }
+      >
+        <Field label="SKUs" hint="One per line. Blank lines and duplicates are ignored.">
+          {({ inputId, describedBy }) => (
+            <textarea
+              id={inputId}
+              aria-describedby={describedBy}
+              rows={10}
+              value={addText}
+              onChange={(event) => setAddText(event.target.value)}
+              placeholder={'SKU-0001\nSKU-0002'}
+              className="w-full rounded-lg border border-[var(--color-border-strong)] bg-[var(--color-surface)] px-3 py-2 font-mono text-sm outline-none focus:border-[var(--color-brand)]"
+            />
+          )}
+        </Field>
+      </Dialog>
+
       <Dialog
         open={cancelOpen}
         tone="danger"

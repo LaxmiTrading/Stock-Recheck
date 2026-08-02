@@ -157,6 +157,26 @@ export const listItemsQuerySchema = z.object({
   pageSize: z.string().regex(/^\d+$/).optional(),
 });
 
+/* ------------------------------------------------- recheck composition */
+
+export const removeRecheckItemsRequestSchema = z.object({
+  itemIds: z.array(uuidSchema).min(1, 'Select at least one item.').max(1000),
+});
+export type RemoveRecheckItemsRequest = z.infer<typeof removeRecheckItemsRequestSchema>;
+
+export const addRecheckItemsRequestSchema = z.object({
+  /**
+   * Raw SKUs exactly as pasted. Normalization and duplicate handling are the
+   * shared domain's job, so adding behaves identically to an import.
+   */
+  skus: z
+    .array(z.string().max(200))
+    .min(1, 'Enter at least one SKU.')
+    // Matches the import ceiling; validation is one catalogue sweep either way.
+    .max(5000, 'Add at most 5000 SKUs at a time.'),
+});
+export type AddRecheckItemsRequest = z.infer<typeof addRecheckItemsRequestSchema>;
+
 /* ----------------------------------------------------------------- claims */
 
 export const heartbeatRequestSchema = z.object({

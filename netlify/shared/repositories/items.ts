@@ -35,6 +35,7 @@ import {
 } from '../errors';
 import { query, queryMany, queryOne, withTransaction, type TransactionClient } from '../database/client';
 import { recordAuditEventInTransaction } from '../audit';
+import type { ResolvedSnapshot } from './imports';
 
 /* ------------------------------------------------------------------ types */
 
@@ -907,6 +908,104 @@ export async function recalculateRecheckProgress(
 export async function refreshRecheckProgress(recheckId: string): Promise<void> {
   await withTransaction(async (client) => {
     await recalculateRecheckProgress(client, recheckId);
+  });
+}
+
+/* --------------------------------------------------- composition edits -- */
+
+export interface RemovedItemSummary {
+  id: string;
+  sku: string;
+  item_name: string;
+}
+
+/**
+ * Removes items from a Stock Recheck — AVAILABLE ones only.
+ *
+ * The status guard is in the DELETE itself rather than a prior read, so an item
+ * claimed or submitted between the operator pressing the button and this
+ * statement running is simply not deleted. Checking first and deleting second
+ * would leave exactly that gap, and losing a submitted count is unrecoverable.
+ *
+ * A hard delete rather than a `removed` status: the recheck's cached counters
+ * are constrained to `available + in_progress + submitted = total`, so a fourth
+ * state would mean changing the enum, that constraint, and every query, filter
+ * and export that reads status — with one missed spot silently corrupting the
+ * figures. An available item has never been counted, so there is no result,
+ * attempt or difference to preserve; the audit event records what was removed.
+ */
+export async function removeAvailableItems(
+  recheckId: string,
+  itemIds: readonly string[],
+): Promise<{ removed: RemovedItemSummary[]; skipped: number }> {
+  if (itemIds.length === 0) return { removed: [], skipped: 0 };
+
+  return withTransaction(async (client) => {
+    const result = await client.query<RemovedItemSummary>(
+      `DELETE FROM stock_recheck_items
+        WHERE stock_recheck_id = $1
+          AND id = ANY($2::uuid[])
+          AND workflow_status = 'available'
+          AND submitted_at IS NULL
+        RETURNING id, sku, item_name`,
+      [recheckId, itemIds],
+    );
+
+    // Counters are cached on the recheck and constrained, so they must move
+    // with the rows inside the same transaction.
+    await recalculateRecheckProgress(client, recheckId);
+
+    return {
+      removed: result.rows,
+      skipped: itemIds.length - result.rows.length,
+    };
+  });
+}
+
+/**
+ * Adds already-validated items to an existing Stock Recheck.
+ *
+ * The snapshots must have been resolved against THIS recheck's stock basis, so
+ * an added row is measured the same way as the ones the recheck was created
+ * with. `snapshotAt` stays per row: a row added on day two genuinely was read
+ * from Zoho on day two, and pretending otherwise would misdate the evidence.
+ *
+ * `ON CONFLICT DO NOTHING` on (stock_recheck_id, normalized_sku) makes a repeat
+ * add idempotent — re-pasting a list that overlaps what is already there adds
+ * only the genuinely new SKUs instead of failing the whole request.
+ */
+export async function addRecheckItems(
+  recheckId: string,
+  snapshots: readonly ResolvedSnapshot[],
+): Promise<number> {
+  if (snapshots.length === 0) return 0;
+
+  return withTransaction(async (client) => {
+    const result = await client.query(
+      `INSERT INTO stock_recheck_items (
+         stock_recheck_id, zoho_item_id, item_name, sku, normalized_sku,
+         zoho_stock_quantity, vendor_name, unit, zoho_snapshot_json
+       )
+       SELECT $1, * FROM UNNEST(
+         $2::text[], $3::text[], $4::text[], $5::text[],
+         $6::numeric[], $7::text[], $8::text[], $9::jsonb[]
+       )
+       ON CONFLICT (stock_recheck_id, normalized_sku) DO NOTHING`,
+      [
+        recheckId,
+        snapshots.map((snapshot) => snapshot.zohoItemId),
+        snapshots.map((snapshot) => snapshot.itemName),
+        snapshots.map((snapshot) => snapshot.sku),
+        snapshots.map((snapshot) => snapshot.normalizedSku),
+        snapshots.map((snapshot) => snapshot.stockInHand),
+        snapshots.map((snapshot) => snapshot.vendorName),
+        snapshots.map((snapshot) => snapshot.unit),
+        snapshots.map((snapshot) => JSON.stringify(snapshot)),
+      ],
+    );
+
+    await recalculateRecheckProgress(client, recheckId);
+    return result.rowCount ?? 0;
   });
 }
 

@@ -14,11 +14,13 @@
 
 import type { Config, Context } from '@netlify/functions';
 import {
+  addRecheckItemsRequestSchema,
   cancelRecheckRequestSchema,
   createRecheckRequestSchema,
   exportQuerySchema,
   listItemsQuerySchema,
   listRechecksQuerySchema,
+  removeRecheckItemsRequestSchema,
 } from '../../src/schemas/api';
 import {
   buildExportFileName,
@@ -60,7 +62,9 @@ import {
   completeIdempotentOperation,
 } from '../shared/idempotency';
 import { createItemsFromPassedRows, findImportBatch } from '../shared/repositories/imports';
+import { toSourceRows, validateImportRows } from '../shared/validation/importValidator';
 import {
+  addRecheckItems,
   applyStockRefresh,
   expireStaleClaims,
   listFilterFacets,
@@ -70,6 +74,7 @@ import {
   listScannableItems,
   recalculateRecheckProgress,
   refreshRecheckProgress,
+  removeAvailableItems,
   type StockRefreshUpdate,
 } from '../shared/repositories/items';
 import {
@@ -567,6 +572,148 @@ const cancelRecheckHandler = async (request: Request, context: RouteContext): Pr
  * Still GET-only against Zoho (section 2.1): this reads stock and writes the
  * result into our own database. Nothing is ever sent to Zoho.
  */
+/**
+ * Removes items from a recheck — section 18, available rows only.
+ *
+ * Composing a recheck is an import-level capability, so it is gated on
+ * `recheck:import` (administrators). A counter can claim and count, not decide
+ * what the recheck contains.
+ */
+const removeItemsHandler = async (request: Request, context: RouteContext): Promise<Response> => {
+  const actor = await requireActorWith(request, 'recheck:import');
+  const recheckId = context.params.id as string;
+  const body = await parseJsonBody(request, removeRecheckItemsRequestSchema);
+
+  const recheck = await findRecheckById(recheckId);
+  if (recheck === null) throw new NotFoundError('Stock Recheck');
+  if (isRecheckReadOnly(recheck.status)) {
+    throw new AppError(
+      'RECHECK_READ_ONLY',
+      'This Stock Recheck is closed, so its items can no longer be changed.',
+      409,
+    );
+  }
+
+  // The status guard lives in the DELETE, so anything claimed or submitted in
+  // the meantime is reported as skipped rather than removed.
+  const { removed, skipped } = await removeAvailableItems(recheckId, body.itemIds);
+
+  if (removed.length > 0) {
+    await recordAuditEvent({
+      eventType: 'recheck.items_removed',
+      actorUserId: actor.id,
+      actorDisplayName: actor.displayName,
+      stockRecheckId: recheckId,
+      // The rows are gone, so the SKUs are recorded here — this event is the
+      // only remaining evidence of what the recheck used to contain.
+      metadata: {
+        removedCount: removed.length,
+        skippedCount: skipped,
+        skus: removed.map((item) => item.sku),
+      },
+      correlationId: context.correlationId,
+      requestIp: context.requestIp,
+    });
+  }
+
+  return jsonSuccess(
+    {
+      removed: removed.length,
+      skipped,
+      items: removed.map((item) => ({ id: item.id, sku: item.sku, itemName: item.item_name })),
+    },
+    context.correlationId,
+  );
+};
+
+/**
+ * Adds SKUs to an existing recheck — section 18.
+ *
+ * Runs the SAME validation the import screen runs, against the recheck's OWN
+ * stock basis rather than the current default: a basis changed since creation
+ * must not silently measure new rows differently from the existing ones
+ * (section 28.3).
+ */
+const addItemsHandler = async (request: Request, context: RouteContext): Promise<Response> => {
+  const actor = await requireActorWith(request, 'recheck:import');
+  const recheckId = context.params.id as string;
+  const body = await parseJsonBody(request, addRecheckItemsRequestSchema);
+
+  const recheck = await findRecheckById(recheckId);
+  if (recheck === null) throw new NotFoundError('Stock Recheck');
+  if (isRecheckReadOnly(recheck.status)) {
+    throw new AppError(
+      'RECHECK_READ_ONLY',
+      'This Stock Recheck is closed, so items can no longer be added.',
+      409,
+    );
+  }
+
+  const settings = await getSettings();
+  const reader = await createBooksReader();
+
+  const summary = await validateImportRows(
+    toSourceRows(
+      body.skus.map((rawValue, index) => ({ sourceRowNumber: index + 1, rawValue })),
+      settings.skuCaseSensitive,
+    ),
+    {
+      reader,
+      stockBasis: {
+        type: recheck.stock_basis_type,
+        locationId: recheck.stock_location_id,
+        locationName: recheck.stock_location_name,
+        warehouseId: recheck.stock_warehouse_id,
+        warehouseName: recheck.stock_warehouse_name,
+      },
+      organizationId: recheck.zoho_organization_id,
+      organizationName: recheck.zoho_organization_name,
+      caseSensitive: settings.skuCaseSensitive,
+      correlationId: context.correlationId,
+    },
+  );
+
+  const snapshots = summary.results
+    .filter((row) => row.status === 'passed' && row.snapshot !== null)
+    .map((row) => row.snapshot as NonNullable<typeof row.snapshot>);
+
+  const added = await addRecheckItems(recheckId, snapshots);
+
+  if (added > 0) {
+    await recordAuditEvent({
+      eventType: 'recheck.items_added',
+      actorUserId: actor.id,
+      actorDisplayName: actor.displayName,
+      stockRecheckId: recheckId,
+      metadata: { added, requested: body.skus.length, failed: summary.failed },
+      correlationId: context.correlationId,
+      requestIp: context.requestIp,
+    });
+  }
+
+  return jsonSuccess(
+    {
+      added,
+      requested: body.skus.length,
+      // Validated but not inserted: the SKU is already in this recheck.
+      alreadyPresent: snapshots.length - added,
+      failed: summary.failed,
+      ignoredBlanks: summary.ignoredBlanks,
+      duplicates: summary.duplicates,
+      // A failed row has no snapshot, so the SKU comes from what was submitted:
+      // `toSourceRows` numbered them 1..n in the order they were sent.
+      failures: summary.results
+        .filter((row) => row.status === 'failed')
+        .slice(0, 50)
+        .map((row) => ({
+          sku: body.skus[row.sourceRowNumber - 1] ?? null,
+          reason: row.failureReason,
+        })),
+    },
+    context.correlationId,
+  );
+};
+
 const refreshStockHandler = async (request: Request, context: RouteContext): Promise<Response> => {
   const actor = await requireActorWith(request, 'recheck:import');
   const recheckId = context.params.id as string;
@@ -785,6 +932,8 @@ const routes: Route[] = [
   { method: 'GET', pattern: '/api/rechecks/:id/scannables', handler: listScannablesHandler },
   { method: 'POST', pattern: '/api/rechecks/:id/cancel', handler: cancelRecheckHandler },
   { method: 'POST', pattern: '/api/rechecks/:id/refresh-stock', handler: refreshStockHandler },
+  { method: 'POST', pattern: '/api/rechecks/:id/items/remove', handler: removeItemsHandler },
+  { method: 'POST', pattern: '/api/rechecks/:id/items/add', handler: addItemsHandler },
   { method: 'GET', pattern: '/api/rechecks/:id/summary', handler: summaryHandler },
   { method: 'GET', pattern: '/api/rechecks/:id/export.xlsx', handler: exportHandler },
 ];
